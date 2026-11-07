@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#0f1115">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Control PC</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <span id="dot" class="dot"></span>
+  <span id="status">Conectando…</span>
+  <span id="pcname" class="pcname"></span>
+  <span id="latency" class="latency"></span>
+  <button id="fullscreen" class="icon-btn" aria-label="Pantalla completa">⛶</button>
+</header>
+
+<main>
+  <!-- ============================ MOUSE ============================ -->
+  <section id="tab-mouse" class="panel active">
+    <div id="pad" class="pad">
+      <div class="pad-hint">
+        1 dedo: mover · toque: clic<br>
+        2 dedos: scroll · toque con 2: clic derecho<br>
+        doble toque y arrastrar: arrastrar · mantener: clic derecho
+      </div>
+      <div id="strip" class="strip"><span>⇕</span></div>
+    </div>
+    <div class="mbtns">
+      <button data-hold="l">Izquierdo</button>
+      <button data-hold="m" class="narrow">●</button>
+      <button data-hold="r">Derecho</button>
+      <button id="draglock" class="narrow" title="Mantener clic izquierdo">🔒</button>
+    </div>
+  </section>
+
+  <!-- ============================ TECLADO ============================ -->
+  <section id="tab-keys" class="panel scroll">
+    <label class="lbl" for="live">Escribe aquí (se envía al instante)</label>
+    <input id="live" class="live" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Toca para abrir el teclado…">
+
+    <div class="mods">
+      <button class="mod" data-mod="ctrl">Ctrl</button>
+      <button class="mod" data-mod="alt">Alt</button>
+      <button class="mod" data-mod="shift">Shift</button>
+      <button class="mod" data-mod="win">Win</button>
+    </div>
+
+    <div class="grid g5">
+      <button data-key="esc">Esc</button>
+      <button data-key="tab">Tab</button>
+      <button data-key="backspace" data-repeat>⌫</button>
+      <button data-key="delete" data-repeat>Supr</button>
+      <button data-key="enter">⏎</button>
+    </div>
+    <div class="arrows">
+      <button data-key="home">Inicio</button>
+      <button data-key="up" data-repeat>▲</button>
+      <button data-key="end">Fin</button>
+      <button data-key="pageup">RePág</button>
+      <button data-key="left" data-repeat>◀</button>
+      <button data-key="down" data-repeat>▼</button>
+      <button data-key="right" data-repeat>▶</button>
+      <button data-key="pagedown">AvPág</button>
+    </div>
+    <div class="grid g2">
+      <button data-key="space" class="wide">Espacio</button>
+      <button data-key="menu">Menú ≡</button>
+    </div>
+
+    <details class="box">
+      <summary>Teclas F1 – F12</summary>
+      <div class="grid g6" id="fkeys"></div>
+    </details>
+
+    <details class="box">
+      <summary>Enviar texto largo / pegar</summary>
+      <textarea id="bulk" rows="4" placeholder="Escribe o pega un texto, enlace, etc."></textarea>
+      <div class="grid g2">
+        <button id="bulk-send" class="primary">Enviar al PC</button>
+        <button id="bulk-send-enter">Enviar + Enter</button>
+      </div>
+    </details>
+  </section>
+
+  <!-- ============================ MEDIA ============================ -->
+  <section id="tab-media" class="panel scroll">
+    <div class="media-main">
+      <button data-key="prev" class="round">⏮</button>
+      <button data-key="playpause" class="round big">⏯</button>
+      <button data-key="next" class="round">⏭</button>
+    </div>
+    <div class="grid g3 vol">
+      <button data-key="voldown" data-repeat data-norepeatmods>🔉 −</button>
+      <button data-key="volmute">🔇</button>
+      <button data-key="volup" data-repeat data-norepeatmods>🔊 +</button>
+    </div>
+    <div class="grid g3">
+      <button data-key="left" data-repeat>⏪ −5s</button>
+      <button data-key="stop">⏹ Stop</button>
+      <button data-key="right" data-repeat>+5s ⏩</button>
+    </div>
+    <div class="grid g3">
+      <button data-key="space">␣ Pausa (web)</button>
+      <button data-key="f">⛶ F</button>
+      <button data-key="f11">F11</button>
+    </div>
+    <p class="note">⏮ ⏯ ⏭ funcionan con Spotify, YouTube, VLC, etc. Los botones de ±5s y “Pausa (web)” envían ←/→/Espacio a la ventana activa.</p>
+  </section>
+
+  <!-- ============================ ATAJOS ============================ -->
+  <section id="tab-more" class="panel scroll">
+    <h3>Ventanas</h3>
+    <div class="grid g3">
+      <button id="alttab-back">⇤ Ant.</button>
+      <button id="alttab" class="primary">Alt+Tab</button>
+      <button data-combo="win+tab">Vista tareas</button>
+      <button data-combo="win+d">Escritorio</button>
+      <button data-combo="win+e">Explorador</button>
+      <button data-combo="alt+f4" data-confirm="¿Cerrar la ventana activa (Alt+F4)?">Cerrar ✕</button>
+    </div>
+
+    <h3>Edición</h3>
+    <div class="grid g3">
+      <button data-combo="ctrl+c">Copiar</button>
+      <button data-combo="ctrl+v">Pegar</button>
+      <button data-combo="ctrl+x">Cortar</button>
+      <button data-combo="ctrl+z">Deshacer</button>
+      <button data-combo="ctrl+y">Rehacer</button>
+      <button data-combo="ctrl+a">Selec. todo</button>
+      <button data-combo="ctrl+s">Guardar</button>
+      <button data-combo="ctrl+f">Buscar</button>
+      <button data-combo="win+shift+s">Captura</button>
+    </div>
+
+    <h3>Navegador</h3>
+    <div class="grid g3">
+      <button data-combo="alt+left">← Atrás</button>
+      <button data-combo="ctrl+t">Nueva pestaña</button>
+      <button data-combo="alt+right">Adelante →</button>
+      <button data-combo="ctrl+shift+tab">Pestaña ant.</button>
+      <button data-combo="ctrl+w">Cerrar pestaña</button>
+      <button data-combo="ctrl+tab">Pestaña sig.</button>
+      <button data-combo="ctrl+-" data-repeat>Zoom −</button>
+      <button data-combo="ctrl+0">Zoom 100%</button>
+      <button data-combo="ctrl+=" data-repeat>Zoom +</button>
+    </div>
+
+    <h3>Presentación</h3>
+    <div class="grid g2 present">
+      <button data-key="left" class="tall">◀ Anterior</button>
+      <button data-key="right" class="tall primary">Siguiente ▶</button>
+    </div>
+    <div class="grid g3">
+      <button data-key="f5">Iniciar F5</button>
+      <button data-key="b">Pantalla negra</button>
+      <button data-key="esc">Salir Esc</button>
+    </div>
+
+    <h3>Sistema</h3>
+    <div class="grid g3">
+      <button data-combo="ctrl+shift+esc">Adm. tareas</button>
+      <button data-combo="win">Inicio ⊞</button>
+      <button data-combo="win+i">Configuración</button>
+      <button data-sys="monitor">Apagar pantalla</button>
+      <button data-sys="lock" data-confirm="¿Bloquear el PC?">Bloquear 🔒</button>
+      <button data-sys="sleep" data-confirm="¿Suspender el PC? Se cortará la conexión." class="danger">Suspender</button>
+    </div>
+  </section>
+
+  <!-- ============================ AJUSTES ============================ -->
+  <section id="tab-settings" class="panel scroll">
+    <h3>Puntero</h3>
+    <div class="setting">
+      <div class="row"><span>Sensibilidad</span><b id="v-sens"></b></div>
+      <input type="range" id="s-sens" min="0.3" max="6" step="0.1">
+      <p class="help" id="h-sens"></p>
+    </div>
+    <div class="setting">
+      <div class="row"><span>Aceleración</span><b id="v-accel"></b></div>
+      <input type="range" id="s-accel" min="0" max="2" step="0.05">
+      <p class="help">Movimientos rápidos llegan más lejos; los lentos son precisos. 0 = lineal.</p>
+    </div>
+    <div class="setting">
+      <div class="row"><span>Sensibilidad de scroll</span><b id="v-scroll"></b></div>
+      <input type="range" id="s-scroll" min="0.2" max="5" step="0.1">
+    </div>
+    <h3>Gestos</h3>
+    <label class="toggle"><span>Tocar para hacer clic</span><input type="checkbox" id="s-tap"></label>
+    <label class="toggle"><span>Mantener presionado = clic derecho</span><input type="checkbox" id="s-longpress"></label>
+    <label class="toggle"><span>Scroll natural (como en el celular)</span><input type="checkbox" id="s-natural"></label>
+    <label class="toggle"><span>Barra de scroll en el borde derecho</span><input type="checkbox" id="s-strip"></label>
+    <label class="toggle"><span>Vibración al tocar</span><input type="checkbox" id="s-haptic"></label>
+
+    <div class="grid g2" style="margin-top:16px">
+      <button id="reset">Restablecer ajustes</button>
+      <button id="unpair" class="danger">Desvincular</button>
+    </div>
+    <p class="note" id="info"></p>
+  </section>
+</main>
+
+<nav class="tabs">
+  <button data-tab="mouse" class="active"><i>🖱️</i>Mouse</button>
+  <button data-tab="keys"><i>⌨️</i>Teclado</button>
+  <button data-tab="media"><i>🎵</i>Media</button>
+  <button data-tab="more"><i>⚡</i>Atajos</button>
+  <button data-tab="settings"><i>⚙️</i>Ajustes</button>
+</nav>
+
+<div id="overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <h2 id="ov-title">Sin conexión</h2>
+    <p id="ov-text"></p>
+    <button id="ov-retry" class="primary">Reintentar</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
