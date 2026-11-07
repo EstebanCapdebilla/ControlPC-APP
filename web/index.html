@@ -36,6 +36,7 @@
       <button data-hold="m" class="narrow">●</button>
       <button data-hold="r">Derecho</button>
       <button id="draglock" class="narrow" title="Mantener clic izquierdo">🔒</button>
+      <button id="gyro" class="narrow" title="Mantén presionado y mueve el celular" hidden>🎯</button>
     </div>
   </section>
 
@@ -82,9 +83,18 @@
       <summary>Enviar texto largo / pegar</summary>
       <textarea id="bulk" rows="4" placeholder="Escribe o pega un texto, enlace, etc."></textarea>
       <div class="grid g2">
-        <button id="bulk-send" class="primary">Enviar al PC</button>
-        <button id="bulk-send-enter">Enviar + Enter</button>
+        <button id="bulk-send" class="primary">Escribir en el PC</button>
+        <button id="bulk-send-enter">Escribir + Enter</button>
       </div>
+    </details>
+
+    <details class="box">
+      <summary>Portapapeles compartido</summary>
+      <div class="grid g2">
+        <button id="clip-to-pc">📋 Celular → PC</button>
+        <button id="clip-from-pc">📥 PC → Celular</button>
+      </div>
+      <p class="note" id="clip-note">Copia algo en un lado y pégalo en el otro (Ctrl+V en el PC).</p>
     </details>
   </section>
 
@@ -111,6 +121,56 @@
       <button data-key="f11">F11</button>
     </div>
     <p class="note">⏮ ⏯ ⏭ funcionan con Spotify, YouTube, VLC, etc. Los botones de ±5s y “Pausa (web)” envían ←/→/Espacio a la ventana activa.</p>
+  </section>
+
+  <!-- ============================ YOUTUBE MUSIC ============================ -->
+  <section id="tab-music" class="panel scroll">
+    <div id="ytm-noext" class="box ytm-msg" hidden>
+      <b>Falta la extensión en el PC</b>
+      <p>Para controlar YouTube Music instala la extensión <b>Control PC - YouTube Music</b> en Chrome o Edge del PC (carpeta <code>extension</code>, ver LEEME.md) y abre music.youtube.com.</p>
+    </div>
+    <div id="ytm-notab" class="box ytm-msg" hidden>
+      <b>YouTube Music no está abierto en el PC</b>
+      <button id="ytm-open" class="primary" style="width:100%;margin-top:10px">Abrir YouTube Music en el PC</button>
+    </div>
+
+    <div id="ytm-player" class="ytm-player" hidden>
+      <div class="ytm-top">
+        <img id="ytm-art" class="ytm-art" alt="" referrerpolicy="no-referrer">
+        <div class="ytm-meta">
+          <div id="ytm-title" class="ytm-title">Nada sonando</div>
+          <div id="ytm-artist" class="ytm-artist">Busca una canción abajo</div>
+        </div>
+      </div>
+      <input type="range" id="ytm-seek" min="0" max="100" step="1" value="0" aria-label="Progreso">
+      <div class="ytm-times"><span id="ytm-cur">0:00</span><span id="ytm-dur">0:00</span></div>
+      <div class="ytm-ctrls">
+        <button data-ytm="shuffle" class="ytm-sm" aria-label="Aleatorio">🔀</button>
+        <button data-ytm="prev" class="round" aria-label="Anterior">⏮</button>
+        <button data-ytm="playpause" id="ytm-pp" class="round big" aria-label="Reproducir o pausar">▶</button>
+        <button data-ytm="next" class="round" aria-label="Siguiente">⏭</button>
+        <button data-ytm="repeat" id="ytm-repeat" class="ytm-sm" aria-label="Repetir">🔁</button>
+      </div>
+      <div class="ytm-row2">
+        <button data-ytm="dislike" id="ytm-dislike" class="ytm-sm" aria-label="No me gusta">👎</button>
+        <span class="ytm-volicon">🔈</span>
+        <input type="range" id="ytm-vol" min="0" max="100" step="1" aria-label="Volumen de YouTube Music">
+        <button data-ytm="like" id="ytm-like" class="ytm-sm" aria-label="Me gusta">👍</button>
+      </div>
+    </div>
+
+    <form id="ytm-search-form" class="ytm-search">
+      <input id="ytm-q" type="search" placeholder="Buscar canciones, artistas…" enterkeyhint="search" autocomplete="off">
+      <button class="primary" type="submit">Buscar</button>
+    </form>
+    <p id="ytm-note" class="note"></p>
+    <div id="ytm-results" class="ytm-list"></div>
+
+    <details class="box" id="ytm-queue-box">
+      <summary>Cola de reproducción</summary>
+      <button id="ytm-queue-refresh" style="width:100%;min-height:40px;padding:8px">Actualizar</button>
+      <div id="ytm-queue" class="ytm-list"></div>
+    </details>
   </section>
 
   <!-- ============================ ATAJOS ============================ -->
@@ -187,6 +247,16 @@
       <p class="help">Movimientos rápidos llegan más lejos; los lentos son precisos. 0 = lineal.</p>
     </div>
     <div class="setting">
+      <div class="row"><span>Suavizado del movimiento</span></div>
+      <select id="s-smooth">
+        <option value="0">Desactivado (respuesta directa)</option>
+        <option value="8">Bajo (~8 ms)</option>
+        <option value="16">Medio (~16 ms, recomendado)</option>
+        <option value="28">Alto (~28 ms, para Wi-Fi inestable)</option>
+      </select>
+      <p class="help">Reparte el movimiento en pasos pequeños en el PC para que el cursor se deslice sin saltos aunque el Wi-Fi entregue los datos a tirones.</p>
+    </div>
+    <div class="setting">
       <div class="row"><span>Sensibilidad de scroll</span><b id="v-scroll"></b></div>
       <input type="range" id="s-scroll" min="0.2" max="5" step="0.1">
     </div>
@@ -196,6 +266,28 @@
     <label class="toggle"><span>Scroll natural (como en el celular)</span><input type="checkbox" id="s-natural"></label>
     <label class="toggle"><span>Barra de scroll en el borde derecho</span><input type="checkbox" id="s-strip"></label>
     <label class="toggle"><span>Vibración al tocar</span><input type="checkbox" id="s-haptic"></label>
+
+    <div id="native-settings" hidden>
+      <h3>App Android</h3>
+      <div class="setting">
+        <div class="row"><span>Botones de volumen del celular</span></div>
+        <select id="s-hwvol">
+          <option value="volume">Subir / bajar volumen del PC</option>
+          <option value="media">Canción siguiente / anterior</option>
+          <option value="slides">Diapositiva siguiente / anterior</option>
+          <option value="ytmvol">Volumen de YouTube Music</option>
+          <option value="scroll">Desplazar (scroll) arriba / abajo</option>
+          <option value="off">Desactivado (volumen del celular)</option>
+        </select>
+      </div>
+      <label class="toggle"><span>Mantener la pantalla encendida</span><input type="checkbox" id="s-awake"></label>
+      <div class="setting" id="gyro-setting">
+        <div class="row"><span>Sensibilidad del giroscopio 🎯</span><b id="v-gyro"></b></div>
+        <input type="range" id="s-gyro" min="0.2" max="4" step="0.1">
+        <p class="help">Mantén presionado 🎯 en la pestaña Mouse y apunta con el celular como un puntero láser.</p>
+      </div>
+      <button id="to-launcher" style="width:100%;margin-top:8px">Cambiar de PC</button>
+    </div>
 
     <div class="grid g2" style="margin-top:16px">
       <button id="reset">Restablecer ajustes</button>
@@ -209,6 +301,7 @@
   <button data-tab="mouse" class="active"><i>🖱️</i>Mouse</button>
   <button data-tab="keys"><i>⌨️</i>Teclado</button>
   <button data-tab="media"><i>🎵</i>Media</button>
+  <button data-tab="music"><i>🎧</i>YT Music</button>
   <button data-tab="more"><i>⚡</i>Atajos</button>
   <button data-tab="settings"><i>⚙️</i>Ajustes</button>
 </nav>
@@ -217,7 +310,13 @@
   <div class="overlay-card">
     <h2 id="ov-title">Sin conexión</h2>
     <p id="ov-text"></p>
+    <div id="ov-pin" hidden>
+      <input id="pin" class="live pin-input" inputmode="numeric" maxlength="7" autocomplete="one-time-code" placeholder="000000">
+      <p id="pin-error" class="pin-error"></p>
+      <button id="pin-go" class="primary">Vincular</button>
+    </div>
     <button id="ov-retry" class="primary">Reintentar</button>
+    <button id="ov-home" hidden>Elegir otro PC</button>
   </div>
 </div>
 

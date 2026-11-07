@@ -24,6 +24,7 @@ import secrets
 import socket
 import struct
 import sys
+import threading
 import time
 import urllib.parse
 import webbrowser
@@ -37,6 +38,7 @@ BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
 CONFIG_FILE = BASE / "config.json"
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+DISCOVERY_PORT = 8766  # UDP, la app Android busca PCs aquí
 
 
 # ----------------------------------------------------------------------------
@@ -51,6 +53,7 @@ def load_config(new_token=False):
             cfg = {}
     if new_token or not cfg.get("token"):
         cfg["token"] = secrets.token_urlsafe(9)
+    cfg.setdefault("id", secrets.token_hex(6))  # identifica a este PC en la app Android
     cfg.setdefault("port", 8765)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), "utf-8")
     return cfg
@@ -227,6 +230,60 @@ class Input:
         _send(ev)
 
 
+# ---------------------------------------------------------------- portapapeles
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+CF_UNICODETEXT = 13
+user32.OpenClipboard.argtypes = (wintypes.HWND,)
+user32.GetClipboardData.argtypes = (wintypes.UINT,)
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+user32.SetClipboardData.restype = wintypes.HANDLE
+kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+kernel32.GlobalLock.restype = wintypes.LPVOID
+kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+
+
+def _open_clipboard():
+    for _ in range(10):
+        if user32.OpenClipboard(None):
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def clipboard_get():
+    if not _open_clipboard():
+        return ""
+    try:
+        h = user32.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return ""
+        p = kernel32.GlobalLock(h)
+        try:
+            return ctypes.wstring_at(p) if p else ""
+        finally:
+            kernel32.GlobalUnlock(h)
+    finally:
+        user32.CloseClipboard()
+
+
+def clipboard_set(text):
+    data = text.encode("utf-16-le") + b"\0\0"
+    if not _open_clipboard():
+        return
+    try:
+        user32.EmptyClipboard()
+        h = kernel32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        p = kernel32.GlobalLock(h)
+        ctypes.memmove(p, data, len(data))
+        kernel32.GlobalUnlock(h)
+        user32.SetClipboardData(CF_UNICODETEXT, h)  # Windows pasa a ser dueño de la memoria
+    finally:
+        user32.CloseClipboard()
+
+
 def system_action(name):
     if name == "lock":
         user32.LockWorkStation()
@@ -270,6 +327,75 @@ class AltTab:
 ALT_TAB = AltTab()
 
 
+class Smoother:
+    """
+    Suaviza el movimiento del puntero.
+
+    Por Wi-Fi los paquetes llegan en ráfagas irregulares (el celular agrupa envíos
+    para ahorrar batería). Si cada paquete se aplicara de golpe, el cursor daría
+    saltos aunque el celular mande 60-120 movimientos por segundo.
+    Aquí cada movimiento recibido se reparte en pasos pequeños a ~500 Hz durante el
+    tiempo típico entre paquetes, así el cursor avanza a velocidad continua.
+    El retraso añadido es como máximo `max_spread` (unos pocos milisegundos).
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.px = self.py = 0.0      # movimiento pendiente (con decimales)
+        self.remaining = 0.0          # segundos en los que repartir lo pendiente
+        self.interval = 0.012         # tiempo medio entre paquetes (se adapta solo)
+        self.last_arrival = 0.0
+        self.max_spread = 0.016       # 0 = sin suavizado
+        threading.Thread(target=self._run, name="suavizado", daemon=True).start()
+
+    def set_level(self, ms):
+        self.max_spread = max(0.0, min(float(ms), 50.0)) / 1000
+
+    def add(self, dx, dy):
+        if self.max_spread <= 0:
+            Input.move(dx, dy)
+            return
+        now = time.perf_counter()
+        with self.lock:
+            gap = now - self.last_arrival
+            if gap >= 0.0025:  # paquetes pegados (<2.5 ms) cuentan como una sola ráfaga
+                self.last_arrival = now
+                if gap < 0.08:  # dentro del mismo gesto: aprender el ritmo de llegada
+                    self.interval += (gap - self.interval) * 0.2
+            self.px += dx
+            self.py += dy
+            self.remaining = min(max(self.interval * 1.25, 0.004), self.max_spread)
+        self.wake.set()
+
+    def _run(self):
+        while True:
+            self.wake.wait()
+            last = time.perf_counter()
+            while True:
+                time.sleep(0.002)  # Python 3.11+ en Windows usa temporizador de alta resolución
+                now = time.perf_counter()
+                dt, last = now - last, now
+                with self.lock:
+                    f = 1.0 if self.remaining <= dt else dt / self.remaining
+                    self.remaining = max(0.0, self.remaining - dt)
+                    ix, iy = int(self.px * f), int(self.py * f)
+                    if f >= 1.0:
+                        ix, iy = int(self.px), int(self.py)
+                    self.px -= ix
+                    self.py -= iy
+                    done = self.remaining == 0 and abs(self.px) < 1 and abs(self.py) < 1
+                    if done:
+                        self.wake.clear()
+                if ix or iy:
+                    Input.move(ix, iy)
+                if done:
+                    break
+
+
+SMOOTH = Smoother()
+
+
 # ----------------------------------------------------------------------------
 # WebSocket mínimo (RFC 6455) sobre asyncio
 # ----------------------------------------------------------------------------
@@ -309,7 +435,7 @@ class WebSocket:
                 n = struct.unpack("!H", await self.r.readexactly(2))[0]
             elif n == 127:
                 n = struct.unpack("!Q", await self.r.readexactly(8))[0]
-            if n > 1 << 20:
+            if n > 4 << 20:
                 raise ConnectionError("mensaje demasiado grande")
             mask = await self.r.readexactly(4) if masked else b""
             data = await self.r.readexactly(n) if n else b""
@@ -344,10 +470,22 @@ class WebSocket:
 # Servidor HTTP + WebSocket
 # ----------------------------------------------------------------------------
 class Server:
-    def __init__(self, token, port):
+    def __init__(self, token, port, server_id):
         self.token = token
         self.port = port
+        self.id = server_id
+        self.name = socket.gethostname()
+        self.pin = f"{secrets.randbelow(10 ** 6):06d}"  # PIN de vinculación (cambia en cada inicio)
+        self.pin_fails = {}  # ip -> (intentos fallidos, bloqueado_hasta)
         self.clients = 0
+        self.phones = set()       # celulares conectados
+        self.exts = []            # extensiones de YouTube Music conectadas
+        self.ytm_state = None     # última canción/estado informado por la extensión
+        self.ytm_pending = {}     # id interno -> (celular, id del celular)
+        self.ytm_seq = 0
+
+    def info(self):
+        return {"app": "rcpc", "name": self.name, "id": self.id, "port": self.port}
 
     @staticmethod
     def _allowed(ip):
@@ -380,10 +518,10 @@ class Server:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
             url = urllib.parse.urlsplit(target)
-            if url.path == "/ws" and headers.get("upgrade", "").lower() == "websocket":
+            if url.path in ("/ws", "/ext") and headers.get("upgrade", "").lower() == "websocket":
                 await self.websocket(reader, writer, headers, url, peer)
             else:
-                await self.http(writer, method, url.path, peer)
+                await self.http(writer, method, url, peer)
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError, ValueError,
                 asyncio.LimitOverrunError, OSError):
             pass
@@ -394,9 +532,14 @@ class Server:
                 pass
 
     # ---------------------------------------------------------------- HTTP
-    async def http(self, writer, method, path, peer):
+    async def http(self, writer, method, url, peer):
+        path = url.path
         if method not in ("GET", "HEAD"):
             return self._respond(writer, 405, b"Metodo no permitido")
+        if path == "/api/info":
+            return self._json(writer, 200, self.info())
+        if path == "/api/pair":
+            return self._json(writer, *self.try_pin(peer, urllib.parse.parse_qs(url.query).get("pin", [""])[0]))
         if path == "/pair":
             if not ipaddress.ip_address(peer).is_loopback:
                 return self._respond(writer, 403, b"Solo desde el propio PC")
@@ -415,9 +558,27 @@ class Server:
         self._respond(writer, 200, body, ctype)
         await writer.drain()
 
+    def try_pin(self, peer, pin):
+        """Cambia el PIN de 6 dígitos por el código de acceso. Bloquea tras 5 fallos."""
+        now = time.monotonic()
+        fails, until = self.pin_fails.get(peer, (0, 0))
+        if now < until:
+            return 429, {"error": f"Demasiados intentos. Espera {int(until - now) + 1} s."}
+        if pin and secrets.compare_digest(pin.strip().encode(), self.pin.encode()):
+            self.pin_fails.pop(peer, None)
+            log(f"Celular vinculado con PIN: {peer}")
+            return 200, {**self.info(), "token": self.token}
+        fails += 1
+        self.pin_fails[peer] = (0, now + 60) if fails >= 5 else (fails, 0)
+        return 403, {"error": "PIN incorrecto"}
+
+    def _json(self, writer, status, obj):
+        self._respond(writer, status, json.dumps(obj).encode(), "application/json")
+
     @staticmethod
     def _respond(writer, status, body, ctype="text/plain; charset=utf-8"):
-        reason = {200: "OK", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed"}[status]
+        reason = {200: "OK", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+                  429: "Too Many Requests"}[status]
         writer.write(
             f"HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len(body)}\r\n"
             f"Cache-Control: no-cache\r\nConnection: close\r\n\r\n".encode() + body
@@ -429,7 +590,8 @@ class Server:
         main = urls[0] if urls else ""
         others = "".join(f"<li><code>{html.escape(u)}</code></li>" for u in urls[1:])
         return PAIR_HTML.replace("{{URL}}", html.escape(main)).replace("{{OTHERS}}", others) \
-            .replace("{{URLJS}}", json.dumps(main))
+            .replace("{{URLJS}}", json.dumps(main)).replace("{{PIN}}", f"{self.pin[:3]} {self.pin[3:]}") \
+            .replace("{{NAME}}", html.escape(self.name))
 
     # ----------------------------------------------------------- WebSocket
     async def websocket(self, reader, writer, headers, url, peer):
@@ -440,6 +602,14 @@ class Server:
             f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode()
         )
         ws = WebSocket(reader, writer)
+        if url.path == "/ext":
+            # Extensión de YouTube Music: solo desde este PC y solo desde una extensión
+            # (las páginas web no pueden poner un Origin chrome-extension://).
+            origin = headers.get("origin", "")
+            if not ipaddress.ip_address(peer).is_loopback or not origin.startswith(("chrome-extension://", "extension://")):
+                ws.close(4003, "solo extension local")
+                return
+            return await self.extension(ws)
         token = urllib.parse.parse_qs(url.query).get("t", [""])[0]
         if not secrets.compare_digest(token.encode(), self.token.encode()):
             log(f"Conexión rechazada (código incorrecto) desde {peer}")
@@ -447,8 +617,12 @@ class Server:
             return
 
         self.clients += 1
+        self.phones.add(ws)
         log(f"Celular conectado: {peer}  (conectados: {self.clients})")
-        ws.send(["hello", socket.gethostname()])
+        ws.send(["hello", self.name, self.id])
+        ws.send(["ytm", "ext", bool(self.exts)])
+        if self.ytm_state is not None:
+            ws.send(["ytm", "state", self.ytm_state])
         held = set()  # botones presionados por este cliente
         loop = asyncio.get_running_loop()
         try:
@@ -458,8 +632,12 @@ class Server:
                     break
                 if isinstance(msg, str):
                     try:
-                        self.dispatch(ws, json.loads(msg), held, loop)
-                    except (ValueError, TypeError, IndexError, KeyError) as e:
+                        a = json.loads(msg)
+                        if a[0] == "ytm":
+                            self.ytm_from_phone(ws, a[1])
+                        else:
+                            self.dispatch(ws, a, held, loop)
+                    except (ValueError, TypeError, IndexError, KeyError, AttributeError) as e:
                         log(f"Mensaje inválido: {e}")
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
@@ -468,14 +646,66 @@ class Server:
                 Input.button(b, False)
             ALT_TAB.release()
             self.clients -= 1
+            self.phones.discard(ws)
             log(f"Celular desconectado: {peer}  (conectados: {self.clients})")
+            ws.close()
+
+    # ------------------------------------------------------ YouTube Music
+    def _to_phones(self, msg):
+        for p in list(self.phones):
+            try:
+                p.send(msg)
+            except Exception:
+                pass
+
+    def ytm_from_phone(self, phone, req):
+        """El celular pide algo a YouTube Music: se reenvía a la extensión."""
+        if not self.exts:
+            phone.send(["ytm", "res", {"id": req.get("id"), "error": "noext"}])
+            return
+        self.ytm_seq += 1
+        key = str(self.ytm_seq)
+        self.ytm_pending[key] = (phone, req.get("id"))
+        if len(self.ytm_pending) > 200:  # no acumular respuestas perdidas
+            self.ytm_pending.pop(next(iter(self.ytm_pending)))
+        self.exts[-1].send(["cmd", {"id": key, "cmd": str(req.get("cmd", "")), "args": req.get("args") or {}}])
+
+    async def extension(self, ws):
+        self.exts.append(ws)
+        log("Extensión de YouTube Music conectada")
+        self._to_phones(["ytm", "ext", True])
+        try:
+            while True:
+                msg = await ws.recv()
+                if msg is None:
+                    break
+                try:
+                    a = json.loads(msg)
+                except ValueError:
+                    continue
+                if a[0] == "state":
+                    self.ytm_state = a[1]
+                    self._to_phones(["ytm", "state", a[1]])
+                elif a[0] == "res" and isinstance(a[1], dict):
+                    phone, pid = self.ytm_pending.pop(str(a[1].get("id")), (None, None))
+                    if phone is not None and phone in self.phones:
+                        phone.send(["ytm", "res", {**a[1], "id": pid}])
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        finally:
+            if ws in self.exts:
+                self.exts.remove(ws)
+            log("Extensión de YouTube Music desconectada")
+            if not self.exts:
+                self.ytm_state = None
+                self._to_phones(["ytm", "ext", False])
             ws.close()
 
     @staticmethod
     def dispatch(ws, a, held, loop):
         t = a[0]
         if t == "m":
-            Input.move(int(a[1]), int(a[2]))
+            SMOOTH.add(int(a[1]), int(a[2]))
         elif t == "s":
             Input.scroll(int(a[1]), int(a[2]) if len(a) > 2 else 0)
         elif t == "c":
@@ -504,6 +734,28 @@ class Server:
             ws.send(["p", a[1]])
         elif t == "sys":
             system_action(a[1])
+        elif t == "cfg":
+            if "smooth" in a[1]:
+                SMOOTH.set_level(a[1]["smooth"])
+        elif t == "cs":
+            clipboard_set(str(a[1])[:200000])
+        elif t == "cg":
+            ws.send(["clip", clipboard_get()[:200000]])
+
+
+class Discovery(asyncio.DatagramProtocol):
+    """Responde a la app Android cuando busca PCs en la red (broadcast UDP)."""
+
+    def __init__(self, srv):
+        self.srv = srv
+        self.transport = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        if data.strip() == b"RCPC_DISCOVER" and Server._allowed(addr[0]):
+            self.transport.sendto(json.dumps(self.srv.info()).encode(), addr)
 
 
 def local_ips():
@@ -539,12 +791,17 @@ font:16px system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 h1{margin:0 0 6px;font-size:22px} p{color:#9aa1b2;line-height:1.5}
 #qr{background:#fff;padding:16px;border-radius:14px;display:inline-block;margin:18px 0}
 code{background:#0f1115;padding:6px 10px;border-radius:8px;display:inline-block;word-break:break-all;color:#7cc4ff}
-ul{list-style:none;padding:0;font-size:13px} ol{text-align:left;color:#9aa1b2;line-height:1.7}
+ul{list-style:none;padding:0;font-size:13px}
+.pin{font:700 44px/1 ui-monospace,Consolas,monospace;letter-spacing:.12em;color:#4f9dff;margin:14px 0}
 </style></head><body><div class="card">
 <h1>Vincular tu celular</h1>
-<p>Conecta el celular a la <b>misma red Wi-Fi</b> que este PC y escanea el código con la cámara.</p>
+<p>Conecta el celular a la <b>misma red Wi-Fi</b> que este PC.</p>
+<h2 style="margin:22px 0 4px;font-size:16px">App Android</h2>
+<p style="margin:0">Abre la app, elige <b>{{NAME}}</b> e ingresa este PIN:</p>
+<div class="pin">{{PIN}}</div>
+<h2 style="margin:22px 0 4px;font-size:16px">O desde el navegador</h2>
+<p style="margin:0">Escanea el código con la cámara y ábrelo en Chrome:</p>
 <div id="qr"></div><br><code>{{URL}}</code>
-<ol><li>Abre el enlace en Chrome.</li><li>Menú ⋮ → <b>Agregar a pantalla principal</b> para tenerla como app.</li></ol>
 <p style="font-size:13px">¿No funciona? Prueba otra dirección:</p><ul>{{OTHERS}}</ul>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -558,11 +815,17 @@ async def main():
     args = sys.argv[1:]
     cfg = load_config(new_token="--new-token" in args)
     port = int(args[args.index("--port") + 1]) if "--port" in args else int(cfg["port"])
-    srv = Server(cfg["token"], port)
+    srv = Server(cfg["token"], port, cfg["id"])
     try:
-        server = await asyncio.start_server(srv.handle, "0.0.0.0", port, reuse_address=True)
+        # Sin reuse_address: en Windows permitiría que dos servidores compartan el puerto en silencio.
+        server = await asyncio.start_server(srv.handle, "0.0.0.0", port, reuse_address=False)
     except OSError as e:
         sys.exit(f"No se pudo abrir el puerto {port}: {e}\n¿Ya hay otro servidor abierto?")
+    try:  # descubrimiento automático para la app Android (puerto UDP fijo)
+        await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: Discovery(srv), local_addr=("0.0.0.0", DISCOVERY_PORT))
+    except OSError as e:
+        log(f"Aviso: descubrimiento automático desactivado ({e})")
 
     ips = local_ips()
     print("=" * 62)
@@ -571,7 +834,8 @@ async def main():
     print("  Abre esto en el celular (misma red Wi-Fi):")
     for ip in ips:
         print(f"    http://{ip}:{port}/?t={cfg['token']}")
-    print(f"\n  Código QR:   http://localhost:{port}/pair")
+    print(f"\n  PIN para la app Android:  {srv.pin[:3]} {srv.pin[3:]}")
+    print(f"  Código QR:   http://localhost:{port}/pair")
     print("  Cerrar:      Ctrl + C")
     print("=" * 62, flush=True)
     if "--no-browser" not in args:
