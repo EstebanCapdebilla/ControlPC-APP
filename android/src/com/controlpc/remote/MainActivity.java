@@ -35,12 +35,18 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.HttpURLConnection;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.SocketTimeoutException;
+import java.net.URL;
+import java.security.SecureRandom;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -48,6 +54,9 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Contenedor nativo de la interfaz web del servidor.
@@ -123,14 +132,17 @@ public class MainActivity extends Activity implements SensorEventListener {
         }
     }
 
+    /** Se puede llamar desde cualquier hilo (p. ej. tras verificar el PC en segundo plano). */
     private void goHome(String message) {
         onRemote = false;
         captureVolume = false;
         remoteHost = null;
         setGyro(false);
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         String url = LAUNCHER + (message != null ? "#" + Uri.encode(message) : "");
-        ui.post(() -> web.loadUrl(url));
+        ui.post(() -> {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            web.loadUrl(url);
+        });
     }
 
     private void js(String code) {
@@ -261,15 +273,116 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     private void savePcs(JSONObject o) { prefs.edit().putString("pcs", o.toString()).apply(); }
 
-    private void openPc(String host, int port, String token) {
+    /**
+     * Abre la página del PC. Si hay códigos guardados para esa dirección, primero el PC
+     * debe demostrar que conoce alguno (sin enviarlo). Así, si otro equipo ocupa la IP
+     * o se hace pasar por el PC, nunca recibe el código.
+     */
+    private void openPc(String host, int port, List<String> tokens) {
+        if (tokens.isEmpty()) { load(host, port, null); return; }
+        new Thread(() -> {
+            String nonce = randomHex(16);
+            String res = httpGet("http://" + host + ":" + port + "/api/prove?n=" + nonce, 2500);
+            if (res == null) { goHome("No se pudo conectar con el PC en " + host + ". ¿Está abierto Control PC?"); return; }
+            String proof;
+            try { proof = new JSONObject(res).optString("proof"); } catch (Exception e) { proof = ""; }
+            for (String t : tokens) {
+                if (proofOk(t, nonce, proof)) { load(host, port, t); return; }
+            }
+            goHome("El equipo en " + host + " no pudo demostrar que es tu PC, así que no se le envió tu código. "
+                    + "Si cambiaste el código del PC, reinstalaste o usas otro Windows, olvida ese PC (✕) y vincúlalo con el PIN.");
+        }).start();
+    }
+
+    private void load(String host, int port, String token) {
         remoteHost = host;
         String url = "http://" + host + ":" + port + "/" + (token != null && !token.isEmpty() ? "?t=" + Uri.encode(token) : "");
         ui.post(() -> web.loadUrl(url));
     }
 
+    private static List<String> single(String token) {
+        List<String> l = new ArrayList<>();
+        if (token != null && !token.isEmpty()) l.add(token);
+        return l;
+    }
+
+    // ------------------------------------------------------------------ verificación del PC
+    /** El PC firma (nonce + la IP desde la que le preguntamos) con el código de acceso. */
+    private static boolean proofOk(String token, String nonce, String proof) {
+        if (token == null || token.isEmpty() || proof == null || proof.isEmpty()) return false;
+        for (String ip : localIPv4()) {
+            if (constantEquals(hmacHex(token, "rcpc1|" + nonce + "|" + ip), proof)) return true;
+        }
+        return false;
+    }
+
+    private static String hmacHex(String key, String msg) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return hex(mac.doFinal(msg.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) { return ""; }
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02x", x & 0xFF));
+        return sb.toString();
+    }
+
+    private static boolean constantEquals(String a, String b) {
+        if (a.length() != b.length() || a.isEmpty()) return false;
+        int r = 0;
+        for (int i = 0; i < a.length(); i++) r |= a.charAt(i) ^ b.charAt(i);
+        return r == 0;
+    }
+
+    private static String randomHex(int bytes) {
+        byte[] b = new byte[bytes];
+        new SecureRandom().nextBytes(b);
+        return hex(b);
+    }
+
+    /** Direcciones IPv4 de este celular (Wi-Fi, punto de acceso...). */
+    private static List<String> localIPv4() {
+        List<String> out = new ArrayList<>();
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof Inet4Address) out.add(a.getHostAddress());
+                }
+            }
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    /** null = no hubo conexión; "" = respondió con error. */
+    private static String httpGet(String url, int timeoutMs) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            c.setUseCaches(false);
+            if (c.getResponseCode() != 200) return "";
+            try (InputStream in = c.getInputStream()) {
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = in.read(buf)) > 0 && bo.size() < 65536) bo.write(buf, 0, n);
+                return new String(bo.toByteArray(), StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     // ------------------------------------------------------------------ puente JS
     private class Bridge {
-        @JavascriptInterface public String version() { return "1.1"; }
+        @JavascriptInterface public String version() { return "1.2"; }
 
         @JavascriptInterface public String saved() {
             JSONObject o = pcs();
@@ -293,17 +406,22 @@ public class MainActivity extends Activity implements SensorEventListener {
             JSONObject pc = pcs().optJSONObject(id);
             if (pc == null) return;
             prefs.edit().putString("last", id).apply();
-            openPc(pc.optString("host"), pc.optInt("port", 8765), pc.optString("token"));
+            openPc(pc.optString("host"), pc.optInt("port", 8765), single(pc.optString("token")));
         }
 
         @JavascriptInterface public void openAddress(String host, int port) {
-            String token = null;
+            // Puede haber varios PCs guardados con la misma IP (p. ej. dos Windows en el mismo equipo):
+            // se usa el código que el PC demuestre conocer.
+            List<String> tokens = new ArrayList<>();
             JSONObject all = pcs();
             for (Iterator<String> it = all.keys(); it.hasNext(); ) {
                 JSONObject pc = all.optJSONObject(it.next());
-                if (pc != null && host.equals(pc.optString("host")) && port == pc.optInt("port")) token = pc.optString("token");
+                if (pc != null && host.equals(pc.optString("host")) && port == pc.optInt("port")) {
+                    String t = pc.optString("token");
+                    if (!t.isEmpty() && !tokens.contains(t)) tokens.add(t);
+                }
             }
-            openPc(host, port, token);
+            openPc(host, port, tokens);
         }
 
         /** La página del PC avisa que se conectó con éxito: se guarda para la próxima vez. */
@@ -371,7 +489,9 @@ public class MainActivity extends Activity implements SensorEventListener {
         try (DatagramSocket sock = new DatagramSocket()) {
             sock.setBroadcast(true);
             sock.setSoTimeout(250);
-            byte[] msg = "RCPC_DISCOVER".getBytes(StandardCharsets.US_ASCII);
+            String nonce = randomHex(16);
+            byte[] msg = ("RCPC_DISCOVER " + nonce).getBytes(StandardCharsets.US_ASCII);
+            JSONObject saved = pcs();
             List<InetAddress> targets = broadcastAddresses();
             long end = System.currentTimeMillis() + 1600;
             int round = 0;
@@ -389,11 +509,16 @@ public class MainActivity extends Activity implements SensorEventListener {
                     JSONObject info = new JSONObject(new String(p.getData(), 0, p.getLength(), StandardCharsets.UTF_8));
                     String id = info.optString("id");
                     if (!"rcpc".equals(info.optString("app")) || seen.contains(id)) continue;
+                    JSONObject known = saved.optJSONObject(id);
+                    // PC ya vinculado: solo se cree la respuesta si viene firmada con su código.
+                    // Si no, se ignora (no se cambia su dirección ni se marca "en la red").
+                    if (known != null && !proofOk(known.optString("token"), nonce, info.optString("proof"))) continue;
                     seen.add(id);
                     String host = p.getAddress().getHostAddress();
+                    info.remove("proof");
                     info.put("host", host);
                     found.put(info);
-                    updateHost(id, host, info.optInt("port", 8765), info.optString("name"));
+                    if (known != null) updateHost(id, host, info.optInt("port", 8765), info.optString("name"));
                 } catch (SocketTimeoutException ignored) {
                 } catch (Exception ignored) { }
             }

@@ -1,0 +1,25 @@
+# --- Datos privados: NUNCA subir ---
+# Código de acceso del PC (también se guarda en %APPDATA%\ControlPC)
+config.json
+# Firma de la app Android: quien la tenga puede publicar "actualizaciones" de tu app.
+# Guarda una copia aparte (USB, nube privada): si la pierdes, no podrás actualizar la app instalada.
+*.keystore
+*.jks
+
+# --- Se generan al compilar (van en GitHub Releases, no en el código) ---
+build/
+installer/cache/
+ControlPC-Setup.exe
+*.apk
+*.idsig
+__pycache__/
+*.pyc
+
+# --- Copias de respaldo locales (las versiones anteriores están en el historial de git) ---
+respaldo-*/
+version-1-navegador/
+
+# --- Varios ---
+.claude/settings.local.json
+Thumbs.db
+desktop.ini

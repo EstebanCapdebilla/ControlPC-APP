@@ -10,17 +10,22 @@ Uso:
     python server.py --no-browser  -> inicia sin abrir el navegador
     python server.py --new-token   -> genera un código de acceso nuevo (desvincula celulares)
     python server.py --port 9000   -> usa otro puerto
+    pythonw server.py --tray       -> sin ventana, con ícono junto al reloj (lo usa el instalador)
+
+La configuración y el registro se guardan en %APPDATA%\\ControlPC.
 """
 import asyncio
 import base64
 import ctypes
 import hashlib
+import hmac
 import html
 import ipaddress
 import json
 import mimetypes
 import os
 import secrets
+import shutil
 import socket
 import struct
 import sys
@@ -36,7 +41,12 @@ if sys.platform != "win32":
 
 BASE = Path(__file__).resolve().parent
 WEB = BASE / "web"
-CONFIG_FILE = BASE / "config.json"
+# Datos de este usuario de Windows (el programa puede estar en "Archivos de programa", que es de solo lectura).
+DATA = Path(os.environ.get("APPDATA") or BASE) / "ControlPC"
+CONFIG_FILE = DATA / "config.json"
+LOG_FILE = DATA / "server.log"
+IDLE_TIMEOUT = 10      # s sin mensajes del celular (manda un ping cada 2 s) = conexión muerta
+PIN_MAX_FAILS = 30     # fallos de PIN en total (de cualquier IP) antes de cambiar el PIN
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DISCOVERY_PORT = 8766  # UDP, la app Android busca PCs aquí
 
@@ -45,6 +55,13 @@ DISCOVERY_PORT = 8766  # UDP, la app Android busca PCs aquí
 # Configuración (token de acceso persistente)
 # ----------------------------------------------------------------------------
 def load_config(new_token=False):
+    DATA.mkdir(parents=True, exist_ok=True)
+    old = BASE / "config.json"  # versiones anteriores lo guardaban junto a server.py
+    if not CONFIG_FILE.exists() and old.exists():
+        try:
+            shutil.copyfile(old, CONFIG_FILE)
+        except OSError:
+            pass
     cfg = {}
     if CONFIG_FILE.exists():
         try:
@@ -349,6 +366,12 @@ class Smoother:
         self.max_spread = 0.016       # 0 = sin suavizado
         threading.Thread(target=self._run, name="suavizado", daemon=True).start()
 
+    def stop(self):
+        """Descarta el movimiento pendiente (el celular se desconectó)."""
+        with self.lock:
+            self.px = self.py = 0.0
+            self.remaining = 0.0
+
     def set_level(self, ms):
         self.max_spread = max(0.0, min(float(ms), 50.0)) / 1000
 
@@ -475,8 +498,11 @@ class Server:
         self.port = port
         self.id = server_id
         self.name = socket.gethostname()
-        self.pin = f"{secrets.randbelow(10 ** 6):06d}"  # PIN de vinculación (cambia en cada inicio)
+        self.pin = self.new_pin()  # PIN de vinculación (cambia en cada inicio)
         self.pin_fails = {}  # ip -> (intentos fallidos, bloqueado_hasta)
+        self.pin_fails_total = 0
+        self.on_pin_change = None  # el ícono de la bandeja actualiza su texto
+        self.on_clients_change = None
         self.clients = 0
         self.phones = set()       # celulares conectados
         self.exts = []            # extensiones de YouTube Music conectadas
@@ -484,8 +510,50 @@ class Server:
         self.ytm_pending = {}     # id interno -> (celular, id del celular)
         self.ytm_seq = 0
 
+    @staticmethod
+    def new_pin():
+        return f"{secrets.randbelow(10 ** 6):06d}"
+
     def info(self):
         return {"app": "rcpc", "name": self.name, "id": self.id, "port": self.port}
+
+    def proof(self, nonce, peer):
+        """
+        Demuestra que este PC conoce el código de acceso sin enviarlo.
+        Incluye la IP de quien pregunta: si otro equipo reenvía la pregunta para
+        hacerse pasar por este PC, la prueba no le sirve al celular.
+        """
+        msg = f"rcpc1|{nonce}|{self._norm_ip(peer)}".encode()
+        return hmac.new(self.token.encode(), msg, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _norm_ip(ip):
+        try:
+            a = ipaddress.ip_address(ip)
+            if a.version == 6 and a.ipv4_mapped:
+                a = a.ipv4_mapped
+            return str(a)
+        except ValueError:
+            return ip
+
+    @staticmethod
+    def _host_ok(host):
+        """
+        Solo se aceptan pedidos dirigidos a una IP o a localhost. Así una página web
+        con un dominio propio que apunte a este PC (DNS rebinding) no puede leer nada.
+        """
+        h = host.strip().lower()
+        if h.startswith("["):
+            h = h[1:h.find("]")] if "]" in h else ""
+        elif h.count(":") == 1:
+            h = h.split(":", 1)[0]
+        if h == "localhost":
+            return True
+        try:
+            ipaddress.ip_address(h)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _allowed(ip):
@@ -518,6 +586,8 @@ class Server:
                     k, v = line.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
             url = urllib.parse.urlsplit(target)
+            if not self._host_ok(headers.get("host", "")):
+                return self._respond(writer, 403, b"Host no permitido")
             if url.path in ("/ws", "/ext") and headers.get("upgrade", "").lower() == "websocket":
                 await self.websocket(reader, writer, headers, url, peer)
             else:
@@ -538,6 +608,11 @@ class Server:
             return self._respond(writer, 405, b"Metodo no permitido")
         if path == "/api/info":
             return self._json(writer, 200, self.info())
+        if path == "/api/prove":
+            nonce = urllib.parse.parse_qs(url.query).get("n", [""])[0][:64]
+            if not nonce:
+                return self._respond(writer, 400, b"Falta n")
+            return self._json(writer, 200, {**self.info(), "proof": self.proof(nonce, peer)})
         if path == "/api/pair":
             return self._json(writer, *self.try_pin(peer, urllib.parse.parse_qs(url.query).get("pin", [""])[0]))
         if path == "/pair":
@@ -561,6 +636,8 @@ class Server:
     def try_pin(self, peer, pin):
         """Cambia el PIN de 6 dígitos por el código de acceso. Bloquea tras 5 fallos."""
         now = time.monotonic()
+        if len(self.pin_fails) > 500:  # limpiar bloqueos vencidos
+            self.pin_fails = {k: v for k, v in self.pin_fails.items() if v[0] or v[1] > now}
         fails, until = self.pin_fails.get(peer, (0, 0))
         if now < until:
             return 429, {"error": f"Demasiados intentos. Espera {int(until - now) + 1} s."}
@@ -570,6 +647,12 @@ class Server:
             return 200, {**self.info(), "token": self.token}
         fails += 1
         self.pin_fails[peer] = (0, now + 60) if fails >= 5 else (fails, 0)
+        self.pin_fails_total += 1
+        if self.pin_fails_total >= PIN_MAX_FAILS:  # alguien prueba PINs desde muchas IPs
+            self.pin, self.pin_fails_total = self.new_pin(), 0
+            log("Demasiados PIN incorrectos: se generó un PIN nuevo.")
+            if self.on_pin_change:
+                self.on_pin_change()
         return 403, {"error": "PIN incorrecto"}
 
     def _json(self, writer, status, obj):
@@ -577,7 +660,7 @@ class Server:
 
     @staticmethod
     def _respond(writer, status, body, ctype="text/plain; charset=utf-8"):
-        reason = {200: "OK", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+        reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
                   429: "Too Many Requests"}[status]
         writer.write(
             f"HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len(body)}\r\n"
@@ -610,6 +693,11 @@ class Server:
                 ws.close(4003, "solo extension local")
                 return
             return await self.extension(ws)
+        origin = headers.get("origin", "")
+        if origin and urllib.parse.urlsplit(origin).netloc.lower() != headers.get("host", "").lower():
+            log(f"Conexión rechazada (origen {origin!r}) desde {peer}")
+            ws.close(4003, "origen")
+            return
         token = urllib.parse.parse_qs(url.query).get("t", [""])[0]
         if not secrets.compare_digest(token.encode(), self.token.encode()):
             log(f"Conexión rechazada (código incorrecto) desde {peer}")
@@ -619,6 +707,8 @@ class Server:
         self.clients += 1
         self.phones.add(ws)
         log(f"Celular conectado: {peer}  (conectados: {self.clients})")
+        if self.on_clients_change:
+            self.on_clients_change()
         ws.send(["hello", self.name, self.id])
         ws.send(["ytm", "ext", bool(self.exts)])
         if self.ytm_state is not None:
@@ -627,7 +717,11 @@ class Server:
         loop = asyncio.get_running_loop()
         try:
             while True:
-                msg = await ws.recv()
+                try:  # si el Wi-Fi se corta, Windows tardaría minutos en notarlo
+                    msg = await asyncio.wait_for(ws.recv(), IDLE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    log(f"Sin respuesta del celular {peer}: se cierra la conexión")
+                    break
                 if msg is None:
                     break
                 if isinstance(msg, str):
@@ -642,12 +736,15 @@ class Server:
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
+            SMOOTH.stop()
             for b in held:  # nunca dejar un botón "pegado"
                 Input.button(b, False)
             ALT_TAB.release()
             self.clients -= 1
             self.phones.discard(ws)
             log(f"Celular desconectado: {peer}  (conectados: {self.clients})")
+            if self.on_clients_change:
+                self.on_clients_change()
             ws.close()
 
     # ------------------------------------------------------ YouTube Music
@@ -737,10 +834,11 @@ class Server:
         elif t == "cfg":
             if "smooth" in a[1]:
                 SMOOTH.set_level(a[1]["smooth"])
-        elif t == "cs":
-            clipboard_set(str(a[1])[:200000])
+        elif t == "cs":  # en otro hilo: el portapapeles puede estar ocupado por otro programa
+            loop.run_in_executor(None, clipboard_set, str(a[1])[:200000])
         elif t == "cg":
-            ws.send(["clip", clipboard_get()[:200000]])
+            fut = loop.run_in_executor(None, clipboard_get)
+            fut.add_done_callback(lambda f: f.exception() or ws.send(["clip", (f.result() or "")[:200000]]))
 
 
 class Discovery(asyncio.DatagramProtocol):
@@ -754,8 +852,13 @@ class Discovery(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        if data.strip() == b"RCPC_DISCOVER" and Server._allowed(addr[0]):
-            self.transport.sendto(json.dumps(self.srv.info()).encode(), addr)
+        parts = data.strip().split()
+        if not parts or parts[0] != b"RCPC_DISCOVER" or not Server._allowed(addr[0]):
+            return
+        info = self.srv.info()
+        if len(parts) > 1:  # la app manda un número al azar: se responde con la prueba
+            info["proof"] = self.srv.proof(parts[1][:64].decode("ascii", "replace"), addr[0])
+        self.transport.sendto(json.dumps(info).encode(), addr)
 
 
 def local_ips():
@@ -776,8 +879,29 @@ def local_ips():
     return [ip for ip in ips if not ip.startswith("127.")] or ["127.0.0.1"]
 
 
+_log_file = None
+
+
 def log(msg):
-    print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
+    line = time.strftime("[%H:%M:%S] ") + msg
+    print(line, flush=True)  # con pythonw no hay consola y print no hace nada
+    if _log_file:
+        try:
+            _log_file.write(time.strftime("%Y-%m-%d ") + line + "\n")
+            _log_file.flush()
+        except OSError:
+            pass
+
+
+def open_log():
+    global _log_file
+    DATA.mkdir(parents=True, exist_ok=True)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 512 * 1024:  # no crecer sin límite
+            LOG_FILE.replace(LOG_FILE.with_suffix(".old.log"))
+        _log_file = open(LOG_FILE, "a", encoding="utf-8")
+    except OSError:
+        _log_file = None
 
 
 PAIR_HTML = """<!doctype html>
@@ -804,22 +928,30 @@ ul{list-style:none;padding:0;font-size:13px}
 <div id="qr"></div><br><code>{{URL}}</code>
 <p style="font-size:13px">¿No funciona? Prueba otra dirección:</p><ul>{{OTHERS}}</ul>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/vendor/qrcode.min.js"></script><!-- qrcodejs 1.0.0 (MIT), incluido: funciona sin internet -->
 <script>
 try{new QRCode(document.getElementById('qr'),{text:{{URLJS}},width:240,height:240,correctLevel:QRCode.CorrectLevel.M});}
-catch(e){document.getElementById('qr').outerHTML='<p>(Sin internet para dibujar el QR: escribe la dirección en el celular)</p>';}
+catch(e){document.getElementById('qr').outerHTML='<p>(No se pudo dibujar el QR: escribe la dirección en el celular)</p>';}
 </script></body></html>"""
 
 
-async def main():
-    args = sys.argv[1:]
+async def main(args, tray_mode):
     cfg = load_config(new_token="--new-token" in args)
     port = int(args[args.index("--port") + 1]) if "--port" in args else int(cfg["port"])
     srv = Server(cfg["token"], port, cfg["id"])
+    pair_url = f"http://localhost:{port}/pair"
     try:
         # Sin reuse_address: en Windows permitiría que dos servidores compartan el puerto en silencio.
         server = await asyncio.start_server(srv.handle, "0.0.0.0", port, reuse_address=False)
     except OSError as e:
+        if tray_mode:  # probablemente ya está abierto: mostrar su página
+            import tray
+            if "--no-browser" not in args:
+                webbrowser.open(pair_url)
+            else:
+                tray.message_box(f"No se pudo abrir el puerto {port}.\n¿Control PC ya está abierto?", warn=True)
+            log(f"No se pudo abrir el puerto {port}: {e}")
+            return
         sys.exit(f"No se pudo abrir el puerto {port}: {e}\n¿Ya hay otro servidor abierto?")
     try:  # descubrimiento automático para la app Android (puerto UDP fijo)
         await asyncio.get_running_loop().create_datagram_endpoint(
@@ -828,6 +960,7 @@ async def main():
         log(f"Aviso: descubrimiento automático desactivado ({e})")
 
     ips = local_ips()
+    log(f"Servidor activo en el puerto {port} ({', '.join(ips)}). Datos en {DATA}")
     print("=" * 62)
     print("  CONTROL REMOTO PC  -  servidor activo")
     print("=" * 62)
@@ -835,17 +968,55 @@ async def main():
     for ip in ips:
         print(f"    http://{ip}:{port}/?t={cfg['token']}")
     print(f"\n  PIN para la app Android:  {srv.pin[:3]} {srv.pin[3:]}")
-    print(f"  Código QR:   http://localhost:{port}/pair")
+    print(f"  Código QR:   {pair_url}")
     print("  Cerrar:      Ctrl + C")
     print("=" * 62, flush=True)
     if "--no-browser" not in args:
-        webbrowser.open(f"http://localhost:{port}/pair")
+        webbrowser.open(pair_url)
+
     async with server:
-        await server.serve_forever()
+        if not tray_mode:
+            await server.serve_forever()
+            return
+        import tray
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        last_open = [0.0]
+
+        def show_pair():  # un doble clic no debe abrir dos pestañas
+            if time.monotonic() - last_open[0] > 1.5:
+                last_open[0] = time.monotonic()
+                webbrowser.open(pair_url)
+
+        def tooltip():
+            phones = f" · {srv.clients} celular(es)" if srv.clients else ""
+            return f"Control PC · PIN {srv.pin[:3]} {srv.pin[3:]}{phones}"
+
+        icon = BASE / "icon.ico"
+        t = tray.Tray(tooltip, show_pair, lambda: loop.call_soon_threadsafe(stop.set),
+                      icon_path=str(icon), script=str(Path(__file__).resolve()),
+                      log_path=str(LOG_FILE), data_dir=str(DATA))
+        t.start()
+        srv.on_pin_change = t.refresh
+        srv.on_clients_change = t.refresh
+        if "--no-browser" in args:  # inicio automático con Windows: solo un aviso discreto
+            t.notify("Control PC está activo", f"PIN para vincular: {srv.pin[:3]} {srv.pin[3:]}")
+        await stop.wait()
+        log("Servidor detenido desde la bandeja.")
 
 
 if __name__ == "__main__":
+    _args = sys.argv[1:]
+    _tray = "--tray" in _args
+    if _tray or sys.stdout is None:
+        open_log()
     try:
-        asyncio.run(main())
+        asyncio.run(main(_args, _tray))
     except KeyboardInterrupt:
         print("\nServidor detenido.")
+    except Exception as _e:  # sin consola: que el error no pase desapercibido
+        log(f"Error fatal: {_e!r}")
+        if _tray:
+            import tray
+            tray.message_box(f"Control PC se cerró por un error:\n{_e}\n\nRegistro: {LOG_FILE}", warn=True)
+        raise

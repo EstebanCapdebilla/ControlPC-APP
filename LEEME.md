@@ -10,12 +10,31 @@ Hay dos formas de usarla desde el celular:
 
 ## 1. En el PC
 
-Haz doble clic en **`Iniciar servidor.bat`** (o ejecuta `python server.py`).
+### Opción A: instalador (recomendada)
 
-- La primera vez Windows preguntará por el **Firewall**: marca **Redes privadas** y pulsa *Permitir*.
+Ejecuta **`ControlPC-Setup.exe`** en cada Windows donde quieras usarla. No hace falta instalar Python ni nada más: el instalador trae todo.
+
+- Instala Control PC en *Archivos de programa*, con acceso directo en el menú Inicio y desinstalador (Configuración → Aplicaciones).
+- Agrega la regla del **Firewall** para redes privadas. Si compartes internet desde el celular y Windows marca esa red como *Pública*, marca la opción "Permitir también en redes públicas".
+- Opcional: **iniciar con Windows**. Se puede cambiar después desde el ícono.
+
+Control PC queda como un **ícono junto al reloj** (si no lo ves, revisa la flecha ˄ de iconos ocultos):
+
+- **Clic**: muestra el PIN y el código QR.
+- **Clic derecho**: Iniciar con Windows, Ver registro de conexiones y Salir.
+- Al pasar el mouse muestra el PIN actual y cuántos celulares hay conectados.
+
+Cada Windows tiene su propio código y su propio PIN. El celular los muestra como dos PCs distintos, aunque sean el mismo equipo.
+La vinculación se guarda en `%APPDATA%\ControlPC`, así que reinstalar o actualizar no obliga a ingresar el PIN de nuevo.
+
+### Opción B: con Python (para desarrollar)
+
+Haz doble clic en **`Iniciar servidor.bat`** (o ejecuta `python server.py`). Necesita Python 3.8 o más nuevo.
+
+- La primera vez, Windows preguntará por el **Firewall**: marca **Redes privadas** y pulsa *Permitir*.
 - Se abre una página con el **PIN** de vinculación y un **código QR**. El PIN también aparece en la ventana del servidor.
 
-No hay que instalar nada: el servidor usa solo Python 3.8 o más nuevo.
+No abras las dos opciones al mismo tiempo: las dos usan el puerto 8765.
 
 ## 2a. App Android (recomendada)
 
@@ -98,7 +117,11 @@ Funcionan mientras la app esté abierta en pantalla. Con la app cerrada o en seg
 ## Seguridad
 
 - El servidor **solo acepta conexiones de la red local** (IPs privadas). Las de Internet se rechazan.
-- Para conectarse hace falta el **código de acceso** del PC. Se obtiene con el **PIN de 6 dígitos**, que cambia cada vez que inicias el servidor. Tras 5 PIN incorrectos se bloquean los intentos 60 segundos.
+- Para conectarse hace falta el **código de acceso** del PC. Se obtiene con el **PIN de 6 dígitos**, que cambia cada vez que inicias el servidor. Tras 5 PIN incorrectos desde un mismo equipo se bloquean sus intentos 60 segundos, y tras 30 incorrectos en total se genera un PIN nuevo.
+- **La app Android verifica al PC antes de entregarle el código**: el PC tiene que demostrar que lo conoce, sin enviarlo. Si otro equipo de la red se hace pasar por tu PC o toma su IP, la app no le manda nada y te avisa.
+- Solo se aceptan pedidos dirigidos a la IP del PC o a `localhost`. Así una página web abierta en el PC no puede leer el PIN ni el código.
+- Si el celular deja de responder 10 segundos (por ejemplo, se cortó el Wi-Fi), el PC cierra la conexión y **suelta cualquier clic que estuviera presionado**.
+- La conexión no va cifrada (HTTP en la red local). En una Wi-Fi con contraseña o en el punto de acceso de tu celular está protegida por la red. En una Wi-Fi abierta, alguien cercano podría ver el código.
 - Para desvincular **todos** los celulares: `python server.py --new-token`.
 
 ## Opciones del servidor
@@ -114,8 +137,20 @@ python server.py --new-token    # generar un código de acceso nuevo
 - **La app no encuentra el PC**: revisa que el servidor esté abierto, que ambos estén en la misma Wi-Fi y que el Firewall permita Python en *redes privadas*. En Windows, la red Wi-Fi debe estar marcada como **Privada** (Configuración → Red e Internet → Wi-Fi → tu red). Si sigue sin aparecer, usa **Conectar por IP** con la dirección que muestra el servidor.
 - Algunas redes de invitados o públicas aíslan a los dispositivos entre sí: ahí no funcionará.
 - **No controla ciertas ventanas** (Administrador de tareas, programas abiertos como administrador): ejecuta el servidor como administrador.
-- **El QR no aparece**: la página necesita Internet para dibujarlo. Usa el PIN o escribe la dirección.
-- **Iniciar con Windows**: presiona `Win + R`, escribe `shell:startup` y pon ahí un acceso directo a `Iniciar servidor.bat`.
+- **El QR no aparece**: recarga la página (clic en el ícono). Si sigue sin aparecer, usa el PIN o escribe la dirección.
+- **"No pudo demostrar que es tu PC"** (app Android): el PC cambió su código (`--new-token`, otro Windows o se borró `%APPDATA%\ControlPC`) o hay otro equipo en esa IP. Toca ✕ en ese PC para olvidarlo y vincúlalo de nuevo con el PIN.
+- **Iniciar con Windows**: con el instalador, clic derecho en el ícono → *Iniciar con Windows*. Con Python: presiona `Win + R`, escribe `shell:startup` y pon ahí un acceso directo a `Iniciar servidor.bat`.
+
+## Recompilar el instalador de Windows
+
+Si cambias `server.py`, `tray.py`, `web/` o `extension/`:
+
+```
+powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1
+```
+
+Genera `ControlPC-Setup.exe`. Solo en el PC que compila hace falta **Inno Setup 6** (`winget install JRSoftware.InnoSetup`). El Python embebido se descarga solo en `installer\cache`.
+Para cambiar el ícono: edita `installer\make_icon.py` y ejecútalo (usa Pillow).
 
 ## Recompilar la app Android
 

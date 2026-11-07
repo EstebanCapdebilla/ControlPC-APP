@@ -11,16 +11,19 @@ const store = {
 };
 
 /* ------------------------------------------------------------------ token de acceso */
-const qs = new URLSearchParams(location.search);
-let token = qs.get('t') || store.get('rc_token') || '';
-if (qs.get('t')) {
-  store.set('rc_token', token);
-  history.replaceState(null, '', location.pathname); // quita el código de la barra
-}
-
-/* ------------------------------------------------------------------ ajustes */
 /* Dentro de la app Android existe window.AndroidRC (funciones nativas extra). */
 const NATIVE = window.AndroidRC || null;
+
+/* En la app Android el código lo guarda la app y solo lo entrega después de que el PC
+   demuestra ser el correcto. No se deja en la página: si otro equipo tomara la IP del PC,
+   podría leerlo. En el navegador no hay otra opción que guardarlo aquí. */
+const qs = new URLSearchParams(location.search);
+let token = qs.get('t') || (NATIVE ? '' : store.get('rc_token')) || '';
+if (NATIVE) store.del('rc_token');
+else if (qs.get('t')) store.set('rc_token', token);
+if (qs.get('t')) history.replaceState(null, '', location.pathname); // quita el código de la barra
+
+/* ------------------------------------------------------------------ ajustes */
 
 const DEFAULTS = {
   sens: 1.6, accel: 0.6, scroll: 1.5, natural: true, tap: true, longpress: true, strip: true, haptic: true,
@@ -45,7 +48,8 @@ function applyNative() {
 }
 
 /* ------------------------------------------------------------------ conexión */
-let ws = null, retry = 0, retryTimer = null;
+let ws = null, retry = 0, retryTimer = null, lastPong = 0;
+const DEAD_MS = 6000; // sin respuesta al ping en este tiempo = conexión muerta (p. ej. se cortó el Wi-Fi)
 
 function setStatus(state, text) {
   const dot = $('#dot');
@@ -79,7 +83,7 @@ async function submitPin() {
     const j = await r.json();
     if (!r.ok || !j.token) throw new Error(j.error || 'PIN incorrecto');
     token = j.token;
-    store.set('rc_token', token);
+    if (!NATIVE) store.set('rc_token', token); // la app Android lo guarda al recibir 'hello'
     $('#pin').value = '';
     hideOverlay();
     buzz(20);
@@ -106,12 +110,16 @@ function connect() {
   ws = sock;
   sock.onopen = () => {
     retry = 0;
+    lastPong = performance.now();
     setStatus('ok', 'Conectado');
     hideOverlay();
     sendConfig();
     ping();
+    // al desconectarse, el PC suelta los botones: el 🔒 también se suelta aquí
+    if (dragLocked) { dragLocked = false; $('#draglock').classList.remove('on'); }
   };
   sock.onmessage = (e) => {
+    lastPong = performance.now();
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m[0] === 'p') $('#latency').textContent = Math.round(performance.now() - m[1]) + ' ms';
     else if (m[0] === 'hello') {
@@ -121,7 +129,8 @@ function connect() {
     else if (m[0] === 'ytm') onYtm(m[1], m[2]);
   };
   sock.onclose = (e) => {
-    if (ws === sock) ws = null;
+    if (ws !== sock) return; // ya se dio por muerta (ver checkAlive)
+    ws = null;
     $('#latency').textContent = '';
     if (e.code === 4001) {
       token = '';
@@ -141,8 +150,26 @@ function send(arr) {
 }
 function ping() { send(['p', performance.now()]); }
 function sendConfig() { send(['cfg', { smooth: S.smooth }]); }
-setInterval(ping, 2000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { retry = 0; connect(); } });
+/* Si el Wi-Fi se corta sin avisar, el WebSocket puede seguir "abierto" por minutos.
+   Si el PC deja de responder al ping, se descarta y se reconecta. */
+function checkAlive() {
+  if (!ws || ws.readyState !== 1 || document.hidden) return;
+  if (performance.now() - lastPong < DEAD_MS) return;
+  const sock = ws;
+  ws = null;
+  try { sock.close(); } catch { /* */ }
+  setStatus('bad', 'Reconectando…');
+  $('#latency').textContent = '';
+  retryTimer = setTimeout(connect, 100);
+}
+setInterval(() => { ping(); checkAlive(); }, 2000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  retry = 0;
+  lastPong = performance.now(); // en segundo plano los pings se frenan: dar margen antes de juzgar
+  ping();
+  connect();
+});
 $('#ov-retry').addEventListener('click', () => { retry = 0; hideOverlay(); connect(); });
 
 /* --------------------------------- envío de movimiento con baja latencia
