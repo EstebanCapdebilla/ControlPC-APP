@@ -198,3 +198,11 @@ select {
   width: 100%; font: inherit; color: var(--text); background: var(--surface2);
   border: 1px solid var(--border); border-radius: 10px; padding: 12px;
 }
+.ytm-pl-bar { display: flex; gap: 8px; margin-bottom: 6px; }
+.ytm-pl-bar button { flex: 1; min-height: 40px; padding: 8px; white-space: nowrap; }
+.ytm-pl-title { font-weight: 600; margin: 4px 2px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ytm-more { flex: none; min-height: 40px; padding: 0 12px; font-size: 13px; color: var(--muted); background: none; }
+.ytm-pl-q { width: 100%; font: inherit; font-size: 16px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; outline: none; user-select: text; margin: 2px 0 6px; }
+.ytm-pl-q:focus { border-color: var(--accent); }
+.ytm-pl-status { color: var(--muted); font-size: 12.5px; margin: 0 2px 4px; }
+.ytm-pl-morebtn { width: 100%; min-height: 40px; margin-top: 6px; padding: 8px; }

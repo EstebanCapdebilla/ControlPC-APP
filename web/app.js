@@ -488,7 +488,12 @@ function ytmError(r) {
 }
 
 function onYtm(kind, data) {
-  if (kind === 'ext') { ytm.ext = !!data; if (!data) ytm.state = null; renderYtm(); }
+  if (kind === 'ext') {
+    ytm.ext = !!data;
+    if (!data) { ytm.state = null; pl.lists = null; }
+    else if (openWatch) { clearTimeout(openWatch); openWatch = null; $('#ytm-note').textContent = 'YouTube Music está abierto en el PC.'; }
+    renderYtm();
+  }
   else if (kind === 'state') { ytm.state = data; ytm.stateAt = performance.now(); renderYtm(); }
   else if (kind === 'res') { const r = ytm.pending.get(data.id); if (r) { ytm.pending.delete(data.id); r(data); } }
 }
@@ -563,19 +568,176 @@ function ytmSetVolume(v) {
 function ytmVolumeStep(d) { ytmSetVolume((ytm.state ? (ytm.state.muted ? 0 : ytm.state.volume) : 50) + d); }
 $('#ytm-vol').addEventListener('input', (e) => ytmSetVolume(Number(e.target.value)));
 
-$('#ytm-open').addEventListener('click', async () => {
+/* Abrir YouTube Music: con la extensión conectada la usa (enfoca o abre la pestaña);
+   con el navegador cerrado, el PC abre el navegador predeterminado en music.youtube.com. */
+let openWatch = null;
+$$('.ytm-open').forEach((b) => b.addEventListener('click', async () => {
+  buzz(12);
   $('#ytm-note').textContent = 'Abriendo YouTube Music en el PC…';
   const r = await ytmCmd('open');
-  $('#ytm-note').textContent = r.error ? '' : 'Listo. Si no empieza a sonar, busca una canción.';
-  if (r.error) ytmError(r);
-});
+  if (r.error) { ytmError(r); return; }
+  if (r.browser) {
+    $('#ytm-note').textContent = 'Abriendo el navegador en el PC… espera unos segundos.';
+    clearTimeout(openWatch);
+    openWatch = setTimeout(() => {
+      if (!ytm.ext) $('#ytm-note').textContent = 'Se abrió el navegador, pero la extensión no se conectó. ¿Está instalada en el navegador predeterminado del PC?';
+    }, 20000);
+  } else {
+    $('#ytm-note').textContent = 'Listo. Si no empieza a sonar, busca una canción o elige una lista.';
+  }
+}));
 
-function itemHtml(it, extra = '') {
+function itemHtml(it, extra = '', tail = '') {
   return `<div class="ytm-item" ${extra}>
     <img src="${escHtml(it.thumb || 'icon.svg')}" alt="" loading="lazy" referrerpolicy="no-referrer">
     <div>${it.top ? '<div class="ytm-badge">Resultado principal</div>' : ''}<div class="t">${escHtml(it.title)}</div><div class="s">${escHtml(it.subtitle)}</div></div>
+    ${tail}
   </div>`;
 }
+
+/* ------------------------------------------- listas de reproducción (tu biblioteca)
+   Las listas largas llegan por partes desde el PC. En pantalla se muestran de a
+   PAGE canciones (al llegar al final se agregan más) y el buscador filtra la lista completa. */
+const PAGE = 60, MAX_PARTS = 60;
+const pl = {
+  lists: null,   // tus listas
+  open: null,    // lista abierta { playlistId, title }
+  songs: [],     // todas las canciones cargadas de la lista abierta
+  loading: false,
+  shown: PAGE,   // cuántas se dibujan
+  q: '',         // texto del buscador
+};
+const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const fmtN = (n) => n.toLocaleString('es');
+
+function plView() {
+  const inList = !!pl.open;
+  $('#ytm-pl-back').hidden = !inList;
+  $('#ytm-pl-playall').hidden = !inList;
+  $('#ytm-pl-title').hidden = !inList;
+  if (inList) $('#ytm-pl-title').textContent = pl.open.title;
+  $('#ytm-pl-q').placeholder = inList ? 'Buscar en esta lista…' : 'Buscar en mis listas…';
+}
+function filtered(items) {
+  const words = norm(pl.q).split(/\s+/).filter(Boolean);
+  if (!words.length) return items;
+  return items.filter((it) => { const t = norm(it.title + ' ' + it.subtitle); return words.every((w) => t.includes(w)); });
+}
+function plStatus(text) { $('#ytm-pl-status').textContent = text; $('#ytm-pl-status').hidden = !text; }
+
+/* Dibuja la vista actual (tus listas o las canciones), respetando el filtro y el límite. */
+function plRender() {
+  const box = $('#ytm-pl');
+  const all = pl.open ? pl.songs : (pl.lists || []);
+  const items = filtered(all);
+  const visible = items.slice(0, pl.shown);
+  if (pl.open) {
+    box.innerHTML = visible.map((it) => itemHtml(it, `data-vid="${escHtml(it.videoId)}"`)).join('');
+    const total = fmtN(all.length) + ' canciones';
+    plStatus(pl.q ? `${fmtN(items.length)} de ${total}${pl.loading ? ' (cargando…)' : ''}`
+      : (pl.loading ? `Cargando… ${total}` : total));
+    if (!items.length && !pl.loading) box.innerHTML = `<p class="note">${pl.q ? 'Ninguna canción coincide.' : 'Esta lista está vacía.'}</p>`;
+  } else {
+    box.innerHTML = visible.map((it) => itemHtml(it, `data-pl="${escHtml(it.playlistId)}"`,
+      `<button class="ytm-more" data-songs="${escHtml(it.playlistId)}">Canciones ›</button>`)).join('');
+    plStatus(pl.q ? `${fmtN(items.length)} de ${fmtN(all.length)} listas` : '');
+    if (!items.length) {
+      box.innerHTML = `<p class="note">${pl.q ? 'Ninguna lista coincide.'
+        : 'No encontramos listas en tu biblioteca. Revisa que hayas iniciado sesión en YouTube Music en el PC.'}</p>`;
+    }
+  }
+  const rest = items.length - visible.length;
+  const more = $('#ytm-pl-more');
+  more.hidden = rest <= 0;
+  more.textContent = `Mostrar más (${fmtN(rest)})`;
+  if (pl.open) renderYtm(); // marca la canción que suena
+}
+function plMore() { pl.shown += PAGE; plRender(); }
+// Al acercarse al final de la lista se agregan más solas (el botón queda por si acaso)
+if ('IntersectionObserver' in window) {
+  new IntersectionObserver((es) => { if (es.some((x) => x.isIntersecting) && !$('#ytm-pl-more').hidden) plMore(); },
+    { rootMargin: '300px' }).observe($('#ytm-pl-more'));
+}
+$('#ytm-pl-more').addEventListener('click', plMore);
+
+let qTimer = null;
+$('#ytm-pl-q').addEventListener('input', (e) => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => { pl.q = e.target.value; pl.shown = PAGE; plRender(); }, 120);
+});
+$('#ytm-pl-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+function clearQuery() { pl.q = ''; $('#ytm-pl-q').value = ''; pl.shown = PAGE; }
+
+function renderLists() {
+  pl.open = null; pl.songs = []; pl.loading = false;
+  clearQuery(); plView(); plRender();
+}
+function plFail(r, text) {
+  ytmError(r);
+  plStatus('');
+  $('#ytm-pl-more').hidden = true;
+  $('#ytm-pl').innerHTML = `<p class="note">${escHtml(text)} ${escHtml($('#ytm-note').textContent)}</p>`;
+}
+async function loadPlaylists(force) {
+  if (pl.lists && !force) { renderLists(); return; }
+  pl.open = null; plView(); plStatus('');
+  $('#ytm-pl-more').hidden = true;
+  $('#ytm-pl').innerHTML = '<p class="note">Cargando…</p>';
+  const r = await ytmCmd('playlists');
+  if (r.error) { plFail(r, 'No se pudieron cargar tus listas.'); return; }
+  pl.lists = r.items || [];
+  renderLists();
+}
+async function openPlaylist(id) {
+  const info = { ...((pl.lists || []).find((x) => x.playlistId === id) || { playlistId: id, title: 'Lista' }) };
+  pl.open = info; pl.songs = []; pl.loading = true;
+  clearQuery(); plView();
+  $('#ytm-pl-more').hidden = true;
+  $('#ytm-pl').innerHTML = '<p class="note">Cargando canciones…</p>';
+  plStatus('');
+  let next = '';
+  for (let part = 0; part < MAX_PARTS; part++) {
+    const r = await ytmCmd('playlistSongs', next ? { playlistId: id, next } : { playlistId: id });
+    if (pl.open !== info) return; // volvió atrás o abrió otra lista
+    if (r.error) {
+      pl.loading = false;
+      if (!pl.songs.length) { plFail(r, 'No se pudieron cargar las canciones.'); return; }
+      ytmError(r); // se queda con lo que alcanzó a cargar
+      break;
+    }
+    pl.songs.push(...(r.items || []));
+    next = r.next || '';
+    if (!next) break;
+    plRender(); // ir mostrando mientras llega el resto
+  }
+  pl.loading = false;
+  plRender();
+}
+async function playPlaylist(id) {
+  buzz(12);
+  $('#ytm-note').textContent = 'Reproduciendo la lista en el PC…';
+  const r = await ytmCmd('playPlaylist', { playlistId: id });
+  if (r.error) ytmError(r);
+  else $('#ytm-note').textContent = r.opened ? 'Se abrió YouTube Music en el PC con la lista.' : '';
+}
+$('#ytm-pl-box').addEventListener('toggle', (e) => { if (e.target.open && !pl.open) loadPlaylists(false); });
+$('#ytm-pl-refresh').addEventListener('click', () => (pl.open ? openPlaylist(pl.open.playlistId) : loadPlaylists(true)));
+$('#ytm-pl-back').addEventListener('click', () => { buzz(5); renderLists(); });
+$('#ytm-pl-playall').addEventListener('click', () => pl.open && playPlaylist(pl.open.playlistId));
+$('#ytm-pl').addEventListener('click', async (e) => {
+  const songs = e.target.closest('[data-songs]');
+  if (songs) { buzz(5); $('#ytm-pl-q').blur(); openPlaylist(songs.dataset.songs); return; }
+  const el = e.target.closest('.ytm-item');
+  if (!el) return;
+  $('#ytm-pl-q').blur(); // oculta el teclado
+  if (el.dataset.pl) { playPlaylist(el.dataset.pl); return; }
+  if (el.dataset.vid && pl.open) { // una canción de la lista: suena y sigue con el resto de la lista
+    buzz(12);
+    $$('#ytm-pl .ytm-item').forEach((x) => x.classList.toggle('now', x === el));
+    const r = await ytmCmd('playVideo', { videoId: el.dataset.vid, playlistId: pl.open.playlistId });
+    if (r.error) ytmError(r);
+  }
+});
 
 $('#ytm-search-form').addEventListener('submit', async (e) => {
   e.preventDefault();

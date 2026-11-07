@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Control PC - YouTube Music",
-  "version": "1.0",
+  "version": "1.3",
   "description": "Permite controlar YouTube Music de este navegador desde la app Control PC del celular (solo red local).",
   "minimum_chrome_version": "111",
   "background": { "service_worker": "background.js" },

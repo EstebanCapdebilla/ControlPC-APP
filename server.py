@@ -509,6 +509,7 @@ class Server:
         self.ytm_state = None     # última canción/estado informado por la extensión
         self.ytm_pending = {}     # id interno -> (celular, id del celular)
         self.ytm_seq = 0
+        self.ytm_browser_opened = -1e9
 
     @staticmethod
     def new_pin():
@@ -758,6 +759,16 @@ class Server:
     def ytm_from_phone(self, phone, req):
         """El celular pide algo a YouTube Music: se reenvía a la extensión."""
         if not self.exts:
+            if req.get("cmd") == "open":
+                # Navegador cerrado (la extensión vive dentro de él): lo abre el PC con YouTube Music.
+                # Al arrancar, la extensión se conecta sola y el celular se entera.
+                now = time.monotonic()
+                if now - self.ytm_browser_opened > 8:  # varios toques seguidos = una sola pestaña
+                    self.ytm_browser_opened = now
+                    asyncio.get_running_loop().run_in_executor(None, webbrowser.open, "https://music.youtube.com/")
+                    log("Abriendo YouTube Music en el navegador (pedido del celular)")
+                phone.send(["ytm", "res", {"id": req.get("id"), "ok": True, "browser": True}])
+                return
             phone.send(["ytm", "res", {"id": req.get("id"), "error": "noext"}])
             return
         self.ytm_seq += 1

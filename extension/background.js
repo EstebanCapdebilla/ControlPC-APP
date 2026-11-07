@@ -60,7 +60,12 @@ async function handleCommand(c) {
     }
     if (!tab) {
       if (cmd === 'playVideo' && args.videoId) {
-        await chrome.tabs.create({ url: `${YTM}watch?v=${encodeURIComponent(args.videoId)}`, active: true });
+        const list = args.playlistId ? `&list=${encodeURIComponent(args.playlistId)}` : '';
+        await chrome.tabs.create({ url: `${YTM}watch?v=${encodeURIComponent(args.videoId)}${list}`, active: true });
+        return reply({ ok: true, opened: true });
+      }
+      if (cmd === 'playPlaylist' && args.playlistId) {
+        await chrome.tabs.create({ url: `${YTM}watch?list=${encodeURIComponent(args.playlistId)}`, active: true });
         return reply({ ok: true, opened: true });
       }
       return reply({ error: 'notab' });

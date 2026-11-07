@@ -126,12 +126,13 @@
   <!-- ============================ YOUTUBE MUSIC ============================ -->
   <section id="tab-music" class="panel scroll">
     <div id="ytm-noext" class="box ytm-msg" hidden>
-      <b>Falta la extensión en el PC</b>
-      <p>Para controlar YouTube Music instala la extensión <b>Control PC - YouTube Music</b> en Chrome o Edge del PC (carpeta <code>extension</code>, ver LEEME.md) y abre music.youtube.com.</p>
+      <b>YouTube Music no está abierto en el PC</b>
+      <button class="primary ytm-open" style="width:100%;margin-top:10px">Abrir YouTube Music en el PC</button>
+      <p>Se abre en el navegador predeterminado del PC. Si ya está abierto y sigue este aviso, falta instalar la extensión <b>Control PC - YouTube Music</b> en ese navegador (ver LEEME.md).</p>
     </div>
     <div id="ytm-notab" class="box ytm-msg" hidden>
       <b>YouTube Music no está abierto en el PC</b>
-      <button id="ytm-open" class="primary" style="width:100%;margin-top:10px">Abrir YouTube Music en el PC</button>
+      <button class="primary ytm-open" style="width:100%;margin-top:10px">Abrir YouTube Music en el PC</button>
     </div>
 
     <div id="ytm-player" class="ytm-player" hidden>
@@ -165,6 +166,20 @@
     </form>
     <p id="ytm-note" class="note"></p>
     <div id="ytm-results" class="ytm-list"></div>
+
+    <details class="box" id="ytm-pl-box">
+      <summary>Mis listas de reproducción</summary>
+      <div class="ytm-pl-bar">
+        <button id="ytm-pl-back" hidden>‹ Mis listas</button>
+        <button id="ytm-pl-playall" class="primary" hidden>▶ Reproducir</button>
+        <button id="ytm-pl-refresh">Actualizar</button>
+      </div>
+      <div id="ytm-pl-title" class="ytm-pl-title" hidden></div>
+      <input id="ytm-pl-q" class="ytm-pl-q" type="search" placeholder="Buscar en mis listas…" enterkeyhint="search" autocomplete="off">
+      <div id="ytm-pl-status" class="ytm-pl-status" hidden></div>
+      <div id="ytm-pl" class="ytm-list"></div>
+      <button id="ytm-pl-more" class="ytm-pl-morebtn" hidden>Mostrar más</button>
+    </details>
 
     <details class="box" id="ytm-queue-box">
       <summary>Cola de reproducción</summary>

@@ -69,6 +69,8 @@ Pestaña **🎧 YT Music**: ves la canción que suena en el navegador del PC (po
 - me gusta / no me gusta y volumen de YouTube Music
 - **buscar una canción y que empiece a sonar en el PC**, con su "radio" de canciones similares
 - ver la **cola de reproducción** y saltar a cualquier canción
+- ver **tus listas de reproducción** (incluida "Música que te gustó"): tocar una la reproduce, y en *Canciones ›* ves la lista completa (se carga por partes y se muestra de a 60) y eliges desde qué canción empezar; el buscador de la sección filtra dentro de la lista o entre tus listas
+- **abrir YouTube Music en el PC** desde el celular, incluso con el navegador cerrado: el PC abre el navegador predeterminado (que debe tener la extensión instalada)
 
 No hay que iniciar sesión en la app: se usa la sesión de YouTube Music que ya tienes abierta en el navegador del PC (tus playlists, recomendaciones y Premium). Tu cuenta nunca pasa por el celular.
 
