@@ -1,12 +1,14 @@
 ﻿# Crea ControlPC-Setup.exe (instalador de Windows con Python incluido).
 # Uso:  powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1
 # Necesita (solo en el PC que compila): Inno Setup 6 y el Python embebido en installer\cache.
+# -StageDir: otra carpeta de trabajo (útil si build\stage está en uso por el servidor).
+param([string]$StageDir = 'build\stage')
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
 $pyVer = '3.13.15'
 $zip = Join-Path $here "cache\python-$pyVer-embed-amd64.zip"
-$stage = Join-Path $root 'build\stage'
+$stage = Join-Path $root $StageDir
 
 if (-not (Test-Path $zip)) {
     Write-Host "Descargando Python $pyVer embebido..."
@@ -20,7 +22,7 @@ if (-not $iscc) { throw 'No se encontró Inno Setup 6. Instálalo con:  winget i
 Write-Host '1/3 Preparando archivos...'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
-foreach ($f in 'server.py', 'tray.py', 'icon.ico', 'LEEME.md', 'ControlPC.apk') { Copy-Item (Join-Path $root $f) $stage }
+foreach ($f in 'server.py', 'tray.py', 'screen.py', 'icon.ico', 'LEEME.md', 'ControlPC.apk') { Copy-Item (Join-Path $root $f) $stage }
 Copy-Item -Recurse (Join-Path $root 'web') (Join-Path $stage 'web')
 Copy-Item -Recurse (Join-Path $root 'extension') (Join-Path $stage 'extension')
 
@@ -36,7 +38,7 @@ Write-Host '3/3 Compilando instalador...'
 # escribe y Inno Setup falla ("EndUpdateResource failed"). En ese caso se reintenta.
 $built = Join-Path $root 'build\out\ControlPC-Setup.exe'
 for ($try = 1; $try -le 4; $try++) {
-    & $iscc /Q (Join-Path $here 'ControlPC.iss')
+    & $iscc /Q "/DStage=..\$StageDir" (Join-Path $here 'ControlPC.iss')
     if ($LASTEXITCODE -eq 0) { break }
     if ($try -eq 4) { throw 'Falló Inno Setup' }
     Write-Host "   Reintentando ($try)..."

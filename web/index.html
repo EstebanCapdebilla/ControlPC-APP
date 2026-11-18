@@ -123,6 +123,27 @@
     <p class="note">⏮ ⏯ ⏭ funcionan con Spotify, YouTube, VLC, etc. Los botones de ±5s y “Pausa (web)” envían ←/→/Espacio a la ventana activa.</p>
   </section>
 
+  <!-- ============================ PANTALLA DEL PC ============================ -->
+  <section id="tab-screen" class="panel scr-panel">
+    <div id="scr-wrap" class="scr-wrap">
+      <div id="scr-stage" class="scr-stage">
+        <img id="scr-img" alt="" draggable="false">
+        <video id="scr-video" autoplay playsinline muted hidden></video>
+      </div>
+      <div id="scr-msg" class="scr-msg">Abre esta pestaña para ver la pantalla del PC</div>
+    </div>
+    <div id="scr-keys" class="scr-keys" hidden>
+      <input id="scr-live" type="text" placeholder="Escribe aquí: va directo al PC" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+    </div>
+    <div class="scr-bar">
+      <span id="scr-mode" class="scr-badge">Imágenes</span>
+      <button id="scr-fit" aria-label="Quitar el zoom">⤢</button>
+      <button data-key="esc">Esc</button>
+      <button id="scr-kbd" aria-label="Teclado">⌨️</button>
+      <button id="scr-full" class="primary" aria-label="Pantalla completa horizontal">⛶ Horizontal</button>
+    </div>
+  </section>
+
   <!-- ============================ YOUTUBE MUSIC ============================ -->
   <section id="tab-music" class="panel scroll">
     <div id="ytm-noext" class="box ytm-msg" hidden>
@@ -316,6 +337,7 @@
   <button data-tab="mouse" class="active"><i>🖱️</i>Mouse</button>
   <button data-tab="keys"><i>⌨️</i>Teclado</button>
   <button data-tab="media"><i>🎵</i>Media</button>
+  <button data-tab="screen"><i>🖥️</i>Pantalla</button>
   <button data-tab="music"><i>🎧</i>YT Music</button>
   <button data-tab="more"><i>⚡</i>Atajos</button>
   <button data-tab="settings"><i>⚙️</i>Ajustes</button>

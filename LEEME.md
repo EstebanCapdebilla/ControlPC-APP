@@ -56,10 +56,26 @@ Para tenerla como app: menú **⋮ → Agregar a pantalla principal**.
 |---|---|
 | **Mouse** | Touchpad: 1 dedo mueve, toque = clic, 2 dedos = scroll (vertical y horizontal), toque con 2 dedos = clic derecho, con 3 = clic central, doble toque y arrastrar = arrastrar, mantener presionado = clic derecho. Barra de scroll en el borde derecho. Botones izquierdo / central / derecho (se pueden mantener) y 🔒 para dejar el clic presionado. **🎯 (app)**: mantenlo presionado y apunta con el celular como un puntero láser (giroscopio). |
 | **Teclado** | Escritura en vivo (funciona con autocorrector y dictado por voz), Ctrl/Alt/Shift/Win fijos para combinaciones, flechas, Inicio/Fin, F1–F12, envío de textos largos y **portapapeles compartido** (celular → PC y PC → celular). |
+| **Pantalla** | Ves el escritorio del PC en el celular, como video fluido (hasta ~60 cuadros por segundo). **Tocar** = clic en ese punto, **mantener** = clic derecho, **deslizar** = rueda del mouse, **dos dedos** = zoom y mover. ⌨️ abre un teclado para escribir mientras miras, ⤢ vuelve a la vista completa. Solo se transmite mientras tienes abierta esta pestaña (ver *Pantalla del PC* abajo). |
 | **Media** | Anterior / Play-Pausa / Siguiente, volumen − / silencio / + (mantén para repetir), ±5 s, Stop, pantalla completa. |
 | **YT Music** | Controla YouTube Music del navegador del PC: canción actual, buscar y reproducir, cola, me gusta, volumen (necesita la extensión, ver abajo). |
 | **Atajos** | Alt+Tab (sigue tocando para avanzar ventanas), escritorio, copiar/pegar/deshacer, pestañas del navegador, zoom, modo presentación, administrador de tareas, apagar pantalla, bloquear y suspender. |
 | **Ajustes** | Sensibilidad del puntero (muestra cuántos píxeles mueve 1 cm de dedo), aceleración, sensibilidad de scroll, scroll natural, gestos y vibración. **En la app**: qué hacen los botones físicos de volumen, mantener la pantalla encendida, sensibilidad del giroscopio y cambiar de PC. |
+
+## Pantalla del PC
+
+Al abrir la pestaña **🖥️ Pantalla**:
+
+1. Llegan imágenes al instante (unas 5 por segundo).
+2. En paralelo, el PC abre una ventana **escondida** de Brave (o Chrome / Edge si no está Brave), con un perfil propio que no toca tu navegador normal. Esa ventana captura la pantalla y la envía como **video** (WebRTC con H.264, comprimido por la tarjeta de video).
+3. En uno o dos segundos el celular pasa solo a video (abajo dice **Video** en verde).
+
+Sin clics en el PC: la ventana elige la pantalla completa sola. Al salir de la pestaña, a los pocos segundos se cierra todo y no se usa nada.
+Mientras alguien ve la pantalla, el ícono de Control PC junto al reloj dice **PANTALLA COMPARTIDA**.
+
+- Se ve la pantalla **principal**. Con dos monitores, el navegador podría preguntar cuál compartir: esa ventana se ve en el celular en modo imágenes y puedes tocar la opción desde ahí.
+- Si no hay Brave, Chrome ni Edge, o el video no arranca, sigue funcionando con imágenes (dice **Imágenes** abajo).
+- Netflix y otros contenidos protegidos pueden verse en negro. Las ventanas de permisos de administrador (UAC) no se pueden capturar.
 
 ## YouTube Music desde el celular
 

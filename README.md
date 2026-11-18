@@ -15,6 +15,7 @@ La guía completa (instalación, funciones, extensión de YouTube Music, segurid
 
 | Versión | Qué trajo |
 |---|---|
+| v2.3 | Pantalla del PC en el celular: video fluido (WebRTC, H.264) sin clics en el PC, toques = clics, zoom, teclado, modo horizontal a pantalla completa (app Android 1.3) |
 | v2.2 | Listas de reproducción de YouTube Music (completas, con buscador), botón para abrir YouTube Music desde el celular |
 | v2.1 | Instalador de Windows con ícono en la bandeja, QR sin internet y correcciones de seguridad (verificación del PC en la app, protección contra DNS rebinding, clic que quedaba presionado) |
 | v2.0 | App Android, vinculación con PIN, portapapeles compartido, control de YouTube Music con extensión, suavizado del puntero |
@@ -27,6 +28,7 @@ Para ver el código de una versión anterior: pestaña **Tags** del repositorio,
 ```
 server.py         servidor del PC (solo librería estándar de Python)
 tray.py           ícono en la bandeja de Windows
+screen.py         captura de pantalla y navegador escondido que la comparte
 web/              interfaz que se muestra en el celular (la sirve el PC)
 android/          app Android (contenedor nativo de la interfaz web)
 extension/        extensión de Chrome/Edge para YouTube Music

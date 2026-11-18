@@ -117,9 +117,11 @@ function connect() {
     ping();
     // al desconectarse, el PC suelta los botones: el 🔒 también se suelta aquí
     if (dragLocked) { dragLocked = false; $('#draglock').classList.remove('on'); }
+    if (scr.on) { scr.on = false; scrStart(); } // se reconectó mientras veía la pantalla
   };
   sock.onmessage = (e) => {
     lastPong = performance.now();
+    if (typeof e.data !== 'string') { scrFrame(e.data); return; } // imagen de la pantalla del PC
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m[0] === 'p') $('#latency').textContent = Math.round(performance.now() - m[1]) + ' ms';
     else if (m[0] === 'hello') {
@@ -127,6 +129,7 @@ function connect() {
       if (NATIVE) NATIVE.remember(m[2] || '', m[1], location.hostname, parseInt(location.port, 10) || 80, token);
     } else if (m[0] === 'clip') receiveClipboard(m[1]);
     else if (m[0] === 'ytm') onYtm(m[1], m[2]);
+    else if (m[0] === 'scr') onScr(m[1], m[2]);
   };
   sock.onclose = (e) => {
     if (ws !== sock) return; // ya se dio por muerta (ver checkAlive)
@@ -368,31 +371,34 @@ $('#alttab-back').addEventListener('click', () => { send(['at', 1]); buzz(); });
 /* ------------------------------------------------------------------ escritura en vivo
    Se compara el texto anterior con el nuevo (sirve con Gboard, autocorrector y
    dictado por voz): se borran los caracteres que cambiaron y se envían los nuevos. */
-const live = $('#live');
-let prev = '';
-live.addEventListener('input', () => {
-  const v = live.value;
-  let p = 0;
-  const m = Math.min(prev.length, v.length);
-  while (p < m && prev[p] === v[p]) p++;
-  const del = prev.length - p;
-  const add = v.slice(p);
-  if (del > 0) send(['r', 'backspace', del]);
-  if (add) {
-    if (mods.size) {
-      send(['k', [...takeMods(), add[0]]]);
-      if (add.length > 1) send(['t', add.slice(1)]);
-    } else {
-      send(['t', add]);
+function attachLive(el) { // también lo usa la pestaña Pantalla
+  let prev = '';
+  el.addEventListener('input', () => {
+    const v = el.value;
+    let p = 0;
+    const m = Math.min(prev.length, v.length);
+    while (p < m && prev[p] === v[p]) p++;
+    const del = prev.length - p;
+    const add = v.slice(p);
+    if (del > 0) send(['r', 'backspace', del]);
+    if (add) {
+      if (mods.size) {
+        send(['k', [...takeMods(), add[0]]]);
+        if (add.length > 1) send(['t', add.slice(1)]);
+      } else {
+        send(['t', add]);
+      }
     }
-  }
-  prev = v;
-  if (v.length > 300 && v.endsWith(' ')) { live.value = ''; prev = ''; }
-});
-live.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); send(['k', [...takeMods(), 'enter']]); live.value = ''; prev = ''; }
-  else if (e.key === 'Backspace' && live.value === '') { send(['k', ['backspace']]); }
-});
+    prev = v;
+    if (v.length > 300 && v.endsWith(' ')) { el.value = ''; prev = ''; }
+  });
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); send(['k', [...takeMods(), 'enter']]); el.value = ''; prev = ''; }
+    else if (e.key === 'Backspace' && el.value === '') { send(['k', ['backspace']]); }
+  });
+}
+const live = $('#live');
+attachLive(live);
 
 function sendBulk(enter) {
   const el = $('#bulk');
@@ -784,11 +790,284 @@ $('#ytm-queue').addEventListener('click', async (e) => {
 });
 renderYtm();
 
+/* ------------------------------------------------------------------ pantalla del PC
+   Al abrir la pestaña llegan imágenes PNG al instante; en paralelo el PC abre un navegador
+   escondido que envía la pantalla como video (WebRTC). Cuando el video empieza, se cambia
+   a él (más fluido) y se dejan de pedir imágenes. Si el video falla, siguen las imágenes.
+   Toques: 1 toque = clic ahí · mantener = clic derecho · arrastrar = rueda (o mover si hay
+   zoom) · 2 dedos = zoom y mover. */
+const scr = {
+  on: false, pc: null, mode: 'img', aspect: 16 / 9, imgUrl: '',
+  z: 1, tx: 0, ty: 0,           // zoom y desplazamiento de la vista
+  base: { x: 0, y: 0, w: 0, h: 0 },
+  videoTimer: null, info: '',
+};
+const scrWrap = $('#scr-wrap'), scrStage = $('#scr-stage'), scrImg = $('#scr-img'), scrVid = $('#scr-video');
+
+function scrMsg(t) { $('#scr-msg').textContent = t; $('#scr-msg').hidden = !t; }
+function scrBadge() {
+  const b = $('#scr-mode');
+  b.textContent = scr.mode === 'video' ? 'Video' : 'Imágenes';
+  b.classList.toggle('on', scr.mode === 'video');
+  b.title = scr.info;
+}
+
+function scrLayout() {
+  const W = scrWrap.clientWidth, H = scrWrap.clientHeight;
+  if (!W || !H) return;
+  let w = W, h = W / scr.aspect;
+  if (h > H) { h = H; w = H * scr.aspect; }
+  scr.base = { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  scrStage.style.width = w + 'px';
+  scrStage.style.height = h + 'px';
+  scrApply();
+}
+function scrClamp() {
+  const { x, y, w, h } = scr.base, W = scrWrap.clientWidth, H = scrWrap.clientHeight;
+  const sw = w * scr.z, sh = h * scr.z;
+  const fit = (t, size, box, off) => (size <= box ? (box - size) / 2 - off : Math.min(-off, Math.max(box - size - off, t)));
+  scr.tx = fit(scr.tx, sw, W, x);
+  scr.ty = fit(scr.ty, sh, H, y);
+}
+function scrApply() {
+  scrClamp();
+  scrStage.style.transform = `translate(${scr.base.x + scr.tx}px, ${scr.base.y + scr.ty}px) scale(${scr.z})`;
+}
+function scrResetView() { scr.z = 1; scr.tx = 0; scr.ty = 0; scrApply(); }
+window.addEventListener('resize', () => { if (scr.on) scrLayout(); });
+
+function scrSetAspect(w, h) {
+  if (!w || !h) return;
+  const a = w / h;
+  if (Math.abs(a - scr.aspect) > 0.01) { scr.aspect = a; scrLayout(); }
+}
+
+function scrSetMode(mode) {
+  scr.mode = mode;
+  scrImg.hidden = mode !== 'img';
+  scrVid.hidden = mode !== 'video';
+  send(['scr', 'png', mode === 'img']); // con video ya no hacen falta imágenes
+  scrBadge();
+}
+
+function scrStart() {
+  if (scr.on || !ws || ws.readyState !== 1) { if (!scr.on) scrMsg('Sin conexión con el PC'); return; }
+  scr.on = true;
+  scr.info = '';
+  scrMsg('Conectando con la pantalla del PC…');
+  scrSetMode('img');
+  scrLayout();
+  send(['scr', 'start', { w: 960 }]);
+  clearTimeout(scr.videoTimer);
+  scr.videoTimer = setTimeout(() => { // el video no llegó: se sigue con imágenes
+    if (scr.on && scr.mode !== 'video') { scr.info = 'El video no arrancó; usando imágenes.'; scrBadge(); }
+  }, 15000);
+}
+/* Modo horizontal: la pantalla del PC ocupa todo el celular. La app Android 1.3+ gira sola
+   (aunque la rotación automática esté desactivada); en el navegador se usa su pantalla completa. */
+function scrFull(on) {
+  if (on === !!scr.full) return;
+  scr.full = on;
+  document.body.classList.toggle('scr-full', on);
+  $('#scr-full').textContent = on ? '✕' : '⛶ Horizontal';
+  if (NATIVE) {
+    if (NATIVE.setLandscape) NATIVE.setLandscape(on);
+    else if (on) { scrMsg('Gira el celular (o instala la app 1.3 para que gire sola)'); setTimeout(() => scrMsg(''), 4000); }
+    NATIVE.setFullscreen(on);
+  } else if (on) {
+    const el = document.documentElement;
+    if (el.requestFullscreen) {
+      el.requestFullscreen({ navigationUI: 'hide' })
+        .then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape'))
+        .catch(() => {});
+    }
+  } else {
+    try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch { /* */ }
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  }
+  scrResetView();
+  setTimeout(scrLayout, 150);
+  setTimeout(scrLayout, 600); // el giro tarda un momento
+}
+$('#scr-full').addEventListener('click', () => { buzz(10); scrFull(!scr.full); });
+document.addEventListener('fullscreenchange', () => { if (!NATIVE && !document.fullscreenElement && scr.full) scrFull(false); });
+window.rcBack = () => { if (scr.full) { scrFull(false); return true; } return false; }; // botón Atrás (app Android)
+
+function scrStop() {
+  scrFull(false);
+  if (!scr.on) return;
+  scr.on = false;
+  clearTimeout(scr.videoTimer);
+  send(['scr', 'stop']);
+  scrClosePc();
+  if (scr.imgUrl) { URL.revokeObjectURL(scr.imgUrl); scr.imgUrl = ''; }
+  scrImg.removeAttribute('src');
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) scrStop();
+  else if ($('#tab-screen').classList.contains('active')) scrStart();
+});
+
+/* imágenes (llegan como datos binarios por la conexión normal) */
+function scrFrame(blob) {
+  if (!scr.on) return;
+  const url = URL.createObjectURL(blob);
+  scrImg.onload = () => {
+    if (scr.imgUrl && scr.imgUrl !== url) URL.revokeObjectURL(scr.imgUrl);
+    scr.imgUrl = url;
+    if (scr.mode === 'img') { scrSetAspect(scrImg.naturalWidth, scrImg.naturalHeight); scrMsg(''); }
+    send(['scr', 'ack']); // listo para la siguiente
+  };
+  scrImg.onerror = () => { URL.revokeObjectURL(url); send(['scr', 'ack']); };
+  scrImg.src = url;
+}
+
+/* video (WebRTC): el PC ofrece, el celular responde */
+function scrClosePc() {
+  if (scr.pc) { try { scr.pc.close(); } catch { /* */ } scr.pc = null; }
+  scrVid.srcObject = null;
+  if (scr.on && scr.mode === 'video') scrSetMode('img');
+}
+async function onScr(kind, data) {
+  if (kind === 'state') {
+    if (!data) return;
+    if (data.error === 'nobrowser') scr.info = 'No se encontró Brave, Chrome ni Edge en el PC: modo imágenes.';
+    else if (data.error) scr.info = 'Video no disponible (' + data.error + '): modo imágenes.';
+    scrBadge();
+    return;
+  }
+  if (kind !== 'sig' || !scr.on || !data) return;
+  try {
+    if (data.sdp && data.sdp.type === 'offer') {
+      scrClosePc();
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      scr.pc = pc;
+      pc.ontrack = (e) => {
+        scrVid.srcObject = e.streams[0] || new MediaStream([e.track]);
+        scrVid.play().catch(() => {});
+      };
+      pc.onicecandidate = (e) => { if (e.candidate) send(['scr', 'sig', { candidate: e.candidate.toJSON() }]); };
+      pc.onconnectionstatechange = () => {
+        if (pc !== scr.pc) return;
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+          scr.info = 'Se perdió el video; usando imágenes.';
+          scrClosePc();
+        }
+      };
+      await pc.setRemoteDescription(data.sdp);
+      await pc.setLocalDescription(await pc.createAnswer());
+      send(['scr', 'sig', { sdp: pc.localDescription.toJSON() }]);
+    } else if (data.candidate && scr.pc) {
+      await scr.pc.addIceCandidate(data.candidate);
+    }
+  } catch (e) {
+    scr.info = 'Error de video: ' + e.message;
+    scrBadge();
+  }
+}
+scrVid.addEventListener('playing', () => {
+  if (!scr.on) return;
+  scrSetAspect(scrVid.videoWidth, scrVid.videoHeight);
+  scr.info = `Video ${scrVid.videoWidth}×${scrVid.videoHeight}`;
+  scrSetMode('video');
+  scrMsg('');
+});
+scrVid.addEventListener('resize', () => scrSetAspect(scrVid.videoWidth, scrVid.videoHeight));
+
+/* toques */
+const st2 = { pts: new Map(), start: 0, moved: false, long: false, longTimer: null, last: null, pinch: null, acc: 0 };
+function scrPoint(x, y) { // punto de la pantalla del PC (0..1) bajo el dedo, o null si cae fuera
+  const r = scrStage.getBoundingClientRect();
+  const nx = (x - r.left) / r.width, ny = (y - r.top) / r.height;
+  return nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1 ? [nx, ny] : null;
+}
+function scrClickAt(x, y, btn) {
+  const p = scrPoint(x, y);
+  if (!p) return;
+  send(['ma', p[0], p[1]]);
+  send(['c', btn]);
+  buzz(btn === 'r' ? [15, 40, 15] : 8);
+}
+scrWrap.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) st2.pts.set(t.identifier, { x: t.clientX, y: t.clientY });
+  if (e.touches.length === 1) {
+    const t = e.touches[0];
+    st2.start = e.timeStamp; st2.moved = false; st2.long = false; st2.last = { x: t.clientX, y: t.clientY }; st2.acc = 0;
+    clearTimeout(st2.longTimer);
+    st2.longTimer = setTimeout(() => {
+      if (!st2.moved && st2.pts.size === 1) { st2.long = true; scrClickAt(st2.last.x, st2.last.y, 'r'); }
+    }, 550);
+  } else if (e.touches.length === 2) {
+    clearTimeout(st2.longTimer);
+    st2.moved = true;
+    const [a, b] = [...e.touches];
+    st2.pinch = { d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), mx: (a.clientX + b.clientX) / 2, my: (a.clientY + b.clientY) / 2 };
+  }
+}, { passive: false });
+scrWrap.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const r = scrWrap.getBoundingClientRect();
+  if (e.touches.length >= 2 && st2.pinch) { // zoom con dos dedos, centrado entre ellos
+    const [a, b] = [...e.touches];
+    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
+    const z = Math.min(6, Math.max(1, scr.z * d / st2.pinch.d));
+    const ox = mx - r.left - scr.base.x, oy = my - r.top - scr.base.y; // punto bajo los dedos
+    scr.tx = ox - (ox - scr.tx) * (z / scr.z) + (mx - st2.pinch.mx);
+    scr.ty = oy - (oy - scr.ty) * (z / scr.z) + (my - st2.pinch.my);
+    scr.z = z;
+    st2.pinch = { d, mx, my };
+    scrApply();
+    return;
+  }
+  const t = e.touches[0];
+  if (!t || !st2.last) return;
+  const dx = t.clientX - st2.last.x, dy = t.clientY - st2.last.y;
+  if (!st2.moved && Math.hypot(t.clientX - st2.pts.get(t.identifier)?.x, t.clientY - st2.pts.get(t.identifier)?.y) > 10) {
+    st2.moved = true; clearTimeout(st2.longTimer);
+    if (scr.z === 1) { const p = scrPoint(t.clientX, t.clientY); if (p) send(['ma', p[0], p[1]]); } // la rueda actúa donde está el dedo
+  }
+  st2.last = { x: t.clientX, y: t.clientY };
+  if (!st2.moved || st2.long) return;
+  if (scr.z > 1) { scr.tx += dx; scr.ty += dy; scrApply(); } // con zoom: mover la vista
+  else { // sin zoom: rueda del mouse (como deslizar una página)
+    st2.acc += dy * S.scroll * 4 * (S.natural ? 1 : -1);
+    const steps = Math.trunc(st2.acc);
+    if (steps) { queueScroll(steps, 0); st2.acc -= steps; }
+  }
+}, { passive: false });
+function scrTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) st2.pts.delete(t.identifier);
+  if (e.touches.length < 2) st2.pinch = null;
+  if (e.touches.length) { if (e.touches.length === 1) st2.last = { x: e.touches[0].clientX, y: e.touches[0].clientY }; return; }
+  clearTimeout(st2.longTimer);
+  if (e.type !== 'touchcancel' && !st2.moved && !st2.long && e.timeStamp - st2.start < 350) {
+    const t = e.changedTouches[0];
+    scrClickAt(t.clientX, t.clientY, 'l');
+  }
+}
+scrWrap.addEventListener('touchend', scrTouchEnd, { passive: false });
+scrWrap.addEventListener('touchcancel', scrTouchEnd, { passive: false });
+scrWrap.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* barra de la pestaña */
+$('#scr-fit').addEventListener('click', () => { scrResetView(); buzz(5); });
+$('#scr-kbd').addEventListener('click', () => {
+  const k = $('#scr-keys');
+  k.hidden = !k.hidden;
+  if (!k.hidden) setTimeout(() => $('#scr-live').focus(), 50); else $('#scr-live').blur();
+  setTimeout(scrLayout, 300); // el teclado del celular cambia el alto disponible
+});
+attachLive($('#scr-live'));
+
 /* ------------------------------------------------------------------ pestañas */
 function showTab(name) {
   $$('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name !== 'keys') live.blur();
+  if (name === 'screen') scrStart(); else scrStop(); // la pantalla solo se transmite mientras la miras
   store.set('rc_tab', name);
 }
 $$('.tabs button').forEach((b) => b.addEventListener('click', () => { showTab(b.dataset.tab); buzz(5); }));

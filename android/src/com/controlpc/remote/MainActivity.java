@@ -6,6 +6,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -141,6 +142,8 @@ public class MainActivity extends Activity implements SensorEventListener {
         String url = LAUNCHER + (message != null ? "#" + Uri.encode(message) : "");
         ui.post(() -> {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED); // salir del modo horizontal
+            if (fullscreen) applyFullscreen(false);
             web.loadUrl(url);
         });
     }
@@ -165,8 +168,11 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     @Override
     public void onBackPressed() {
-        if (onRemote) goHome(null);
-        else super.onBackPressed();
+        if (!onRemote) { super.onBackPressed(); return; }
+        // La página puede usar Atrás (p. ej. para salir del modo horizontal de la pantalla del PC)
+        web.evaluateJavascript("window.rcBack ? String(!!rcBack()) : 'false'", (v) -> {
+            if (!"\"true\"".equals(v)) goHome(null);
+        });
     }
 
     @Override
@@ -382,7 +388,13 @@ public class MainActivity extends Activity implements SensorEventListener {
 
     // ------------------------------------------------------------------ puente JS
     private class Bridge {
-        @JavascriptInterface public String version() { return "1.2"; }
+        @JavascriptInterface public String version() { return "1.3"; }
+
+        /** true = horizontal (aunque la rotación automática esté desactivada); false = como antes. */
+        @JavascriptInterface public void setLandscape(boolean on) {
+            ui.post(() -> setRequestedOrientation(on ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
+        }
 
         @JavascriptInterface public String saved() {
             JSONObject o = pcs();

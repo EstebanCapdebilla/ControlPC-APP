@@ -2,8 +2,10 @@
 ; Se compila con installer\build-installer.ps1, que prepara la carpeta "stage".
 
 #define AppName "Control PC"
-#define AppVersion "2.0.0"
-#define Stage "..\build\stage"
+#define AppVersion "2.3.0"
+#ifndef Stage
+  #define Stage "..\build\stage"
+#endif
 
 [Setup]
 AppId={{6B0E3C9A-6E1F-4C55-9E62-0C7A5D3B9F21}

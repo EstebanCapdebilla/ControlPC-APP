@@ -24,6 +24,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -33,6 +34,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+import zlib
 from ctypes import wintypes
 from pathlib import Path
 
@@ -40,6 +42,8 @@ if sys.platform != "win32":
     sys.exit("Este servidor está hecho para Windows.")
 
 BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE))  # tray.py y screen.py están junto a este archivo
+import screen  # noqa: E402
 WEB = BASE / "web"
 # Datos de este usuario de Windows (el programa puede estar en "Archivos de programa", que es de solo lectura).
 DATA = Path(os.environ.get("APPDATA") or BASE) / "ControlPC"
@@ -186,6 +190,13 @@ class Input:
     @staticmethod
     def move(dx, dy):
         _send([_mouse(MOUSEEVENTF_MOVE, dx, dy)])
+
+    @staticmethod
+    def move_abs(nx, ny):
+        """Lleva el puntero a una posición de la pantalla principal (0..1 en cada eje)."""
+        nx = min(max(float(nx), 0.0), 1.0)
+        ny = min(max(float(ny), 0.0), 1.0)
+        _send([_mouse(MOUSEEVENTF_MOVE | 0x8000, round(nx * 65535), round(ny * 65535))])  # 0x8000 = ABSOLUTE
 
     @staticmethod
     def scroll(vertical, horizontal):
@@ -432,6 +443,10 @@ class WebSocket:
     def __init__(self, reader, writer):
         self.r, self.w = reader, writer
         self.closed = False
+        peer = writer.get_extra_info("peername") or ("",)
+        sock = writer.get_extra_info("sockname") or ("",)
+        self.peer_ip = Server._norm_ip(peer[0])   # IP del otro equipo
+        self.local_ip = Server._norm_ip(sock[0])  # IP de este PC en esa red
 
     def send_frame(self, opcode, payload=b""):
         if self.closed:
@@ -510,6 +525,7 @@ class Server:
         self.ytm_pending = {}     # id interno -> (celular, id del celular)
         self.ytm_seq = 0
         self.ytm_browser_opened = -1e9
+        self.hub = ScreenHub(self)
 
     @staticmethod
     def new_pin():
@@ -589,7 +605,7 @@ class Server:
             url = urllib.parse.urlsplit(target)
             if not self._host_ok(headers.get("host", "")):
                 return self._respond(writer, 403, b"Host no permitido")
-            if url.path in ("/ws", "/ext") and headers.get("upgrade", "").lower() == "websocket":
+            if url.path in ("/ws", "/ext", "/share") and headers.get("upgrade", "").lower() == "websocket":
                 await self.websocket(reader, writer, headers, url, peer)
             else:
                 await self.http(writer, method, url, peer)
@@ -686,6 +702,8 @@ class Server:
             f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode()
         )
         ws = WebSocket(reader, writer)
+        if url.path == "/share":
+            return await self.hub.sharer_ws(ws, headers, url, peer)
         if url.path == "/ext":
             # Extensión de YouTube Music: solo desde este PC y solo desde una extensión
             # (las páginas web no pueden poner un Origin chrome-extension://).
@@ -730,6 +748,8 @@ class Server:
                         a = json.loads(msg)
                         if a[0] == "ytm":
                             self.ytm_from_phone(ws, a[1])
+                        elif a[0] == "scr":
+                            self.hub.phone(ws, a[1], a[2] if len(a) > 2 else None)
                         else:
                             self.dispatch(ws, a, held, loop)
                     except (ValueError, TypeError, IndexError, KeyError, AttributeError) as e:
@@ -737,6 +757,7 @@ class Server:
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
+            self.hub.remove(ws)
             SMOOTH.stop()
             for b in held:  # nunca dejar un botón "pegado"
                 Input.button(b, False)
@@ -814,6 +835,8 @@ class Server:
         t = a[0]
         if t == "m":
             SMOOTH.add(int(a[1]), int(a[2]))
+        elif t == "ma":
+            Input.move_abs(a[1], a[2])
         elif t == "s":
             Input.scroll(int(a[1]), int(a[2]) if len(a) > 2 else 0)
         elif t == "c":
@@ -850,6 +873,228 @@ class Server:
         elif t == "cg":
             fut = loop.run_in_executor(None, clipboard_get)
             fut.add_done_callback(lambda f: f.exception() or ws.send(["clip", (f.result() or "")[:200000]]))
+
+
+MDNS = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.local")
+
+
+def _unmdns(obj, ip):
+    """
+    Por privacidad, los navegadores ocultan su IP en WebRTC con un nombre "xxxx.local" que
+    el otro lado a veces no puede resolver. El servidor conoce la IP real: la pone en su lugar.
+    """
+    return json.loads(MDNS.sub(ip, json.dumps(obj))) if ip else obj
+
+
+class ScreenHub:
+    """
+    Pantalla del PC en el celular. Mientras algún celular la está viendo:
+      * le manda imágenes PNG (inmediatas; también sirven de respaldo), y
+      * abre una ventana escondida del navegador que comparte la pantalla como video (WebRTC);
+        este servidor solo pone en contacto al navegador con el celular.
+    Cuando nadie la ve, se cierra todo.
+    """
+    PNG_MIN_INTERVAL = 0.2  # máximo ~5 imágenes por segundo
+
+    def __init__(self, srv):
+        self.srv = srv
+        self.browser = screen.CaptureBrowser(DATA / "captura-navegador")
+        self.key = None          # clave de un solo uso para la página que comparte
+        self.sharer = None       # WebSocket de esa página
+        self.ready = False       # la página ya está capturando
+        self.viewers = {}        # WebSocket del celular -> estado
+        self.stop_timer = None
+        self.error = ""
+
+    @staticmethod
+    def vid(ws):
+        return f"v{id(ws)}"
+
+    def _find(self, vid):
+        return next((w for w in self.viewers if self.vid(w) == vid), None)
+
+    def _status(self, ws=None):
+        st = {"video": self.ready, "browser": self.browser.running(), "error": self.error}
+        for w in [ws] if ws else list(self.viewers):
+            try:
+                w.send(["scr", "state", st])
+            except Exception:
+                pass
+
+    def _changed(self):
+        if self.srv.on_clients_change:
+            self.srv.on_clients_change()
+
+    # ---------------------------------------------------------- mensajes del celular
+    def phone(self, ws, kind, data):
+        if kind == "start":
+            self.add(ws, data if isinstance(data, dict) else {})
+        elif kind == "stop":
+            self.remove(ws)
+        elif ws not in self.viewers:
+            return
+        elif kind == "ack":
+            self.viewers[ws]["ack"].set()
+        elif kind == "png":
+            st = self.viewers[ws]
+            st["png"] = bool(data)
+            st["want"].set() if st["png"] else st["want"].clear()
+        elif kind == "sig" and self.sharer is not None and isinstance(data, dict):
+            self.sharer.send(["sig", self.vid(ws), _unmdns(data, ws.peer_ip)])
+        elif kind == "restart":  # el video falló: volver a intentar desde cero
+            self.restart_browser()
+
+    def add(self, ws, opts):
+        if ws in self.viewers:
+            self.remove(ws, keep_browser=True)
+        width = int(min(max(int(opts.get("w") or 960), 320), 1600))
+        st = {"w": width, "png": True, "ack": asyncio.Event(), "want": asyncio.Event()}
+        st["ack"].set()
+        st["want"].set()
+        self.viewers[ws] = st
+        st["task"] = asyncio.get_running_loop().create_task(self.png_loop(ws, st))
+        if self.stop_timer:
+            self.stop_timer.cancel()
+            self.stop_timer = None
+        log(f"Pantalla: {ws.peer_ip} empezó a verla")
+        self._ensure_browser()
+        if self.ready and self.sharer is not None:
+            self.sharer.send(["viewer", self.vid(ws)])
+        self._status(ws)
+        self._changed()
+
+    def remove(self, ws, keep_browser=False):
+        st = self.viewers.pop(ws, None)
+        if st is None:
+            return
+        st["task"].cancel()
+        if self.sharer is not None:
+            try:
+                self.sharer.send(["bye", self.vid(ws)])
+            except Exception:
+                pass
+        log(f"Pantalla: {ws.peer_ip} dejó de verla")
+        if not self.viewers and not keep_browser:  # unos segundos de gracia por si vuelve enseguida
+            loop = asyncio.get_running_loop()
+            self.stop_timer = loop.call_later(6, self.stop_browser)
+        self._changed()
+
+    # ---------------------------------------------------------- navegador que comparte
+    def _ensure_browser(self):
+        if self.browser.running():
+            return
+        self.key = secrets.token_urlsafe(18)
+        self.ready, self.error = False, ""
+        url = f"http://localhost:{self.srv.port}/share.html?k={self.key}"
+        if self.browser.start(url):
+            log(f"Pantalla: abriendo el navegador escondido ({Path(self.browser.exe).name})")
+        else:
+            self.error = "nobrowser"
+            log("Pantalla: no se encontró Brave, Chrome ni Edge; solo modo imágenes")
+
+    def stop_browser(self):
+        self.stop_timer = None
+        if self.viewers:
+            return
+        if self.browser.running() or self.sharer is not None:
+            log("Pantalla: nadie la está viendo, se cierra el navegador escondido")
+        self.browser.stop()
+        if self.sharer is not None:
+            self.sharer.close()
+        self.sharer, self.ready, self.key = None, False, None
+
+    def restart_browser(self):
+        self.browser.stop()
+        if self.sharer is not None:
+            self.sharer.close()
+        self.sharer, self.ready = None, False
+        if self.viewers:
+            self._ensure_browser()
+            self._status()
+
+    async def sharer_ws(self, ws, headers, url, peer):
+        """La página escondida que comparte la pantalla (solo desde este PC y con la clave)."""
+        key = urllib.parse.parse_qs(url.query).get("k", [""])[0]
+        origin = headers.get("origin", "")
+        ok_origin = origin in (f"http://localhost:{self.srv.port}", f"http://127.0.0.1:{self.srv.port}")
+        if (not ipaddress.ip_address(peer).is_loopback or not ok_origin or not self.key
+                or not secrets.compare_digest(key.encode(), self.key.encode())):
+            ws.close(4003, "no autorizado")
+            return
+        if self.sharer is not None:
+            self.sharer.close()
+        self.sharer, self.ready = ws, False
+        try:
+            while True:
+                msg = await ws.recv()
+                if msg is None:
+                    break
+                try:
+                    a = json.loads(msg)
+                    kind = a[0]
+                except (ValueError, TypeError, IndexError):
+                    continue
+                if kind == "ready":
+                    self.ready, self.error = True, ""
+                    info = a[1] if len(a) > 1 and isinstance(a[1], dict) else {}
+                    log(f"Pantalla: video listo ({info.get('width')}x{info.get('height')}, {info.get('label', '')})")
+                    for w in list(self.viewers):
+                        ws.send(["viewer", self.vid(w)])
+                    self._status()
+                    asyncio.get_running_loop().create_task(self._hide_windows())
+                elif kind == "sig" and len(a) > 2:
+                    w = self._find(a[1])
+                    if w is not None and isinstance(a[2], dict):
+                        w.send(["scr", "sig", _unmdns(a[2], w.local_ip)])
+                elif kind in ("error", "ended"):
+                    self.ready = False
+                    self.error = str(a[1])[:200] if len(a) > 1 else kind
+                    log(f"Pantalla: el navegador no pudo compartir ({self.error})")
+                    self._status()
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        finally:
+            if self.sharer is ws:
+                self.sharer, self.ready = None, False
+                self._status()
+            ws.close()
+
+    async def _hide_windows(self):
+        """La barra "is sharing your screen" aparece unos instantes después: se revisa varias veces."""
+        loop = asyncio.get_running_loop()
+        hidden = 0
+        for delay in (0.3, 0.7, 1.5, 3, 5):
+            await asyncio.sleep(delay)
+            if not self.browser.running():
+                return
+            hidden += await loop.run_in_executor(None, screen.hide_capture_windows, self.srv.port)
+        if hidden:
+            log(f"Pantalla: ocultas {hidden} ventana(s) del navegador escondido")
+
+    # ---------------------------------------------------------- imágenes (respaldo)
+    async def png_loop(self, ws, st):
+        loop = asyncio.get_running_loop()
+        last = None
+        try:
+            while ws in self.viewers and not ws.closed:
+                await st["want"].wait()
+                try:  # el celular avisa cuando terminó de mostrar la anterior (así no se acumula retraso)
+                    await asyncio.wait_for(st["ack"].wait(), 4)
+                except asyncio.TimeoutError:
+                    pass
+                t0 = loop.time()
+                rgb, w, h = await loop.run_in_executor(None, screen.capture_rgb, st["w"])
+                sig = zlib.crc32(rgb)
+                if sig != last and st["png"]:
+                    png = await loop.run_in_executor(None, screen.to_png, rgb, w, h)
+                    last = sig
+                    st["ack"].clear()
+                    ws.send_frame(2, png)
+                await asyncio.sleep(max(0.0, self.PNG_MIN_INTERVAL - (loop.time() - t0)))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # una falla de captura no debe tumbar la conexión
+            log(f"Pantalla: error al capturar ({e!r})")
 
 
 class Discovery(asyncio.DatagramProtocol):
@@ -947,6 +1192,7 @@ catch(e){document.getElementById('qr').outerHTML='<p>(No se pudo dibujar el QR: 
 
 
 async def main(args, tray_mode):
+    screen.set_dpi_aware()
     cfg = load_config(new_token="--new-token" in args)
     port = int(args[args.index("--port") + 1]) if "--port" in args else int(cfg["port"])
     srv = Server(cfg["token"], port, cfg["id"])
@@ -1001,7 +1247,8 @@ async def main(args, tray_mode):
 
         def tooltip():
             phones = f" · {srv.clients} celular(es)" if srv.clients else ""
-            return f"Control PC · PIN {srv.pin[:3]} {srv.pin[3:]}{phones}"
+            shared = " · PANTALLA COMPARTIDA" if srv.hub.viewers else ""
+            return f"Control PC · PIN {srv.pin[:3]} {srv.pin[3:]}{phones}{shared}"
 
         icon = BASE / "icon.ico"
         t = tray.Tray(tooltip, show_pair, lambda: loop.call_soon_threadsafe(stop.set),
@@ -1013,6 +1260,8 @@ async def main(args, tray_mode):
         if "--no-browser" in args:  # inicio automático con Windows: solo un aviso discreto
             t.notify("Control PC está activo", f"PIN para vincular: {srv.pin[:3]} {srv.pin[3:]}")
         await stop.wait()
+        srv.hub.viewers.clear()
+        srv.hub.stop_browser()
         log("Servidor detenido desde la bandeja.")
 
 
